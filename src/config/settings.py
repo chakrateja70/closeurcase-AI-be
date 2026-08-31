@@ -11,6 +11,9 @@ class Settings:
         self.DOCS_USERNAME = "admin"
         self.DOCS_PASSWORD = "1234"
 
+        # OpenAI / case detection LLM
+        self.OPENAI_MODEL = "gpt-4.1-nano-2025-04-14"
+        self.OPENAI_API_KEY = self._get_required("OPENAI_API_KEY")
 
     @staticmethod
     def _get_required(key: str) -> str:
