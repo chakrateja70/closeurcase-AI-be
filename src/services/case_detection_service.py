@@ -24,7 +24,7 @@ from src.core.exceptions import (
     TooManyRequestsAPIException,
 )
 from src.prompts.case_detection_prompt import RESPONSE_SCHEMA, SCHEMA_NAME, SYSTEM_PROMPT
-from src.utils.input_sanitizer import clean_text as sanitize_query, find_security_issue
+from src.utils.helper import clean_text as sanitize_query, find_security_issue
 
 MIN_QUERY_LENGTH = 10
 MAX_OUTPUT_TOKENS = 3072
