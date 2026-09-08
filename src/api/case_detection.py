@@ -1,14 +1,19 @@
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, Field
 
+from src.api.deps import get_case_detection_service
 from src.core.case_categories import list_categories
+from src.core.rate_limit import DETECT_RATE_LIMIT, limiter
+from src.core.request_context import client_ip, counter
 from src.services.case_detection_service import CaseDetectionService
 
 router = APIRouter(prefix="/case_detection", tags=["case_detection"])
 
-service = CaseDetectionService()
+DetectionService = Annotated[
+    CaseDetectionService, Depends(get_case_detection_service)
+]
 MAX_QUERY_LENGTH = 600
 
 
@@ -21,7 +26,6 @@ class DetectCaseRequest(BaseModel):
         examples=["My landlord is refusing to return my security deposit after eviction."],
     )
 
-
 class LegalService(BaseModel):
     id: str = Field(
         ...,
@@ -29,19 +33,7 @@ class LegalService(BaseModel):
     )
     title: str
 
-
 class DetectCaseResponse(BaseModel):
-    """Detection decides a case type and nothing else. The category each case
-    type sits under, and the legal services offered under it, are mapped from
-    the taxonomy server-side and returned here, so a caller needs no second
-    request to /categories to act on the result.
-
-    `*_legal_services` is every service available for that case type, in
-    taxonomy order - it is a lookup, not a ranking, so it is not filtered by
-    how well each service fits the query. It is an empty list whenever the
-    matching case type is absent.
-    """
-
     status_code: int = status.HTTP_200_OK
     status_message: str = "success"
     is_valid: bool
@@ -59,12 +51,10 @@ class DetectCaseResponse(BaseModel):
     summary: Optional[str] = None
     fallback_response: Optional[str] = None
 
-
 class CaseType(BaseModel):
     id: str
     title: str
     legal_services: list[LegalService]
-
 
 class CaseCategory(BaseModel):
     id: str
@@ -79,12 +69,26 @@ class CaseCategoriesResponse(BaseModel):
 
 
 @router.post("/detect", response_model=DetectCaseResponse)
-async def detect_case(payload: DetectCaseRequest) -> DetectCaseResponse:
+@limiter.limit(DETECT_RATE_LIMIT)
+async def detect_case(
+    request: Request,
+    response: Response,
+    payload: DetectCaseRequest,
+    service: DetectionService,
+) -> DetectCaseResponse:
     """Classify a user query into a case type.
 
     Classification is done by an OpenAI model constrained to the case taxonomy.
+
+    Rate limited per client IP: the endpoint is unauthenticated and every call
+    costs money upstream. Neither `request` nor `response` is used in the body,
+    but both are required by slowapi - it reads the client address off the
+    request and writes the X-RateLimit-* headers onto the response.
     """
-    result = await service.detect_case(payload.query)
+    caller = client_ip(request)
+    result = await service.detect_case(
+        payload.query, client=f"{caller} #{counter.get(caller)}"
+    )
     return DetectCaseResponse(
         status_code=status.HTTP_200_OK,
         status_message="success",

@@ -8,5 +8,17 @@ dependencies = [
     "fastapi>=0.141.1",
     "openai>=3.6.0",
     "python-dotenv>=1.2.3",
+    "slowapi>=0.1.10",
     "uvicorn[standard]>=0.52.4",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+# Absolute imports rooted at `src.` (the project convention) need the project
+# root on sys.path; there are no __init__.py files to make pytest infer it.
+pythonpath = ["."]
+testpaths = ["test"]

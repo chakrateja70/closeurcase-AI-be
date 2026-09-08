@@ -9,23 +9,31 @@ import unicodedata
 
 # --- Input sanitization for text sent to an LLM -----------------------------
 #
-# Three layers, all meant to run BEFORE the text reaches the model so a
+# Three steps, run in THIS ORDER, all before the text reaches the model so a
 # malicious or out-of-scope input never costs a model call:
 #
-# 1. Character cleaning - strips hidden/control characters and invalid
-#    Unicode, collapses redundant whitespace. Purely mechanical, never
-#    rejects.
-# 2. Prompt-injection defense - flags attempts to override instructions,
-#    leak the system prompt, hijack the model's role, or dictate its output
-#    directly.
-# 3. Scope guardrails - flags content trying to redirect the model to an
-#    unrelated task, or embed a payload meant for a different execution
-#    context (HTML/script, SQL, shell).
+# 1. clean_text - strips hidden/control characters and invalid Unicode and
+#    collapses redundant spacing, but KEEPS line breaks. Purely mechanical,
+#    never rejects.
+# 2. find_security_issue - flags prompt-injection attempts (overriding
+#    instructions, leaking the system prompt, hijacking the model's role or
+#    output) and scope violations (redirecting the model to an unrelated task,
+#    or embedding a payload meant for another execution context).
+# 3. flatten - collapses the surviving line breaks, producing the single-line
+#    string actually sent to the model.
 #
-# Callers that also instruct their model to ignore embedded instructions
-# (e.g. via their own system prompt) get this as a second, independent layer
-# that blocks the obvious cases outright instead of relying on the model
-# alone.
+# Line breaks surviving step 1 is what makes step 2 work: an injected
+# imperative is anchored to the start of a sentence OR a line (_SENTENCE_START,
+# and the line-anchored role marker below). If cleaning collapsed newlines into
+# spaces first, "my case\nIgnore all previous instructions" would present to
+# the scanner as one run-on sentence with no boundary in front of the payload,
+# and every pattern would miss it. So flattening is deferred to step 3.
+#
+# Callers that also instruct their model to ignore embedded instructions (e.g.
+# via their own system prompt) get this as a second, independent layer. It is
+# deliberately the weaker of the two: it blocks the obvious cases, and leans on
+# the model for the rest rather than risking a false positive, because a false
+# positive silently rejects a real client describing a real dispute.
 
 # Zero-width / invisible characters sometimes used to break up a blocked
 # phrase or hide a payload (e.g. "ig​nore previous instructions").
@@ -40,20 +48,37 @@ _ZERO_WIDTH_CHARS = [
 _ZERO_WIDTH_RE = re.compile("[" + "".join(chr(cp) for cp in _ZERO_WIDTH_CHARS) + "]")
 
 # C0/C1 control characters other than tab/LF/CR, which are kept and later
-# collapsed into ordinary whitespace.
+# collapsed into ordinary whitespace. These are DELETED rather than replaced
+# with a space: they are used to splice a blocked word apart the same way the
+# zero-width characters above are, so replacing them would leave "ig\x01nore"
+# as "ig nore" and defeat the scanner, while deleting rejoins it to "ignore".
 _CONTROL_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
-_WHITESPACE_RE = re.compile(r"\s+")
+_CARRIAGE_RETURN_RE = re.compile(r"\r\n?")
+# Horizontal whitespace only - "\s" minus the newline we are preserving.
+_HORIZONTAL_SPACE_RE = re.compile(r"[^\S\n]+")
+_LINE_BREAK_RUN_RE = re.compile(r" ?\n[\s\n]*")
+_ALL_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def clean_text(raw: str) -> str:
     """Normalise Unicode, strip invisible/control characters, collapse
-    redundant whitespace. Purely mechanical - does not judge content."""
+    redundant spacing. Line breaks are preserved for `find_security_issue`;
+    call `flatten` afterwards for the text to send to the model. Purely
+    mechanical - does not judge content."""
     text = unicodedata.normalize("NFKC", raw)
     text = _ZERO_WIDTH_RE.sub("", text)
-    text = _CONTROL_CHARS_RE.sub(" ", text)
-    text = _WHITESPACE_RE.sub(" ", text)
+    text = _CONTROL_CHARS_RE.sub("", text)
+    text = _CARRIAGE_RETURN_RE.sub("\n", text)
+    text = _HORIZONTAL_SPACE_RE.sub(" ", text)
+    text = _LINE_BREAK_RUN_RE.sub("\n", text)
     return text.strip()
+
+
+def flatten(text: str) -> str:
+    """Collapse every remaining whitespace run, including line breaks, into
+    single spaces - the single-line form sent to the model."""
+    return _ALL_WHITESPACE_RE.sub(" ", text).strip()
 
 
 def _compile_all(patterns: list[str]) -> list[re.Pattern]:
@@ -61,10 +86,11 @@ def _compile_all(patterns: list[str]) -> list[re.Pattern]:
 
 
 # An injection attempt is an IMPERATIVE addressed to the model, so it opens a
-# sentence (or the whole query), optionally behind a filler word. Ordinary
-# legal narrative mentions the same verbs mid-sentence - "my friend asked me to
-# act as a guarantor", "the company refused to show the rules I was fired
-# under" - and anchoring here is what keeps those out of the blocked bucket.
+# sentence, a line, or the whole query, optionally behind a filler word.
+# Ordinary legal narrative mentions the same verbs mid-sentence - "my friend
+# asked me to act as a guarantor", "the company refused to show the rules I was
+# fired under" - and anchoring here is what keeps those out of the blocked
+# bucket.
 _SENTENCE_START = r"(?:^|[.!?;\n]\s*)(?:please\s+|now\s+|also\s+|and\s+|then\s+)*"
 
 
@@ -104,12 +130,17 @@ _INJECTION_PATTERNS = _compile_all(
 )
 
 # Content that redirects the model to an unrelated task, or embeds a payload
-# meant for a different execution context (browser, database, shell).
+# meant for a different execution context (browser, database).
 #
 # Task redirection is imperative too, so it gets the same anchor - "my employer
 # asked me to write a program and now claims the IP" is a real IPR query, not
 # an attempt to turn the classifier into a code generator. The payload patterns
 # below stay unanchored: they are not phrased as instructions to anyone.
+#
+# There are deliberately no shell-payload patterns here. Backtick and $(...)
+# spans only mean something to a shell, and this text is never handed to one -
+# it goes to an LLM. Matching them blocked ordinary quoted text and figures
+# like "$(50,000)" while preventing nothing.
 _SCOPE_PATTERNS = _compile_all(
     [
         r"<\s*script\b",
@@ -118,9 +149,6 @@ _SCOPE_PATTERNS = _compile_all(
         r"\bunion\s+select\b",
         r";\s*drop\s+table\b",
         r"'\s*or\s+'?1'?\s*=\s*'?1",
-        r"\$\([^)]*\)",  # $(command substitution)
-        r"`[^`]*`",  # backtick command substitution
-        r";\s*rm\s+-rf\b",
         _SENTENCE_START
         + r"translate\s+(this|the\s+following)\s+(text|sentence|paragraph)?\s*(into|to)\s+\w+",
         _SENTENCE_START
@@ -134,9 +162,9 @@ _SCOPE_PATTERNS = _compile_all(
 
 def find_security_issue(text: str) -> str | None:
     """First matched category ("prompt_injection" / "scope_violation"), or
-    None if the text looks safe. The label is for internal use (printing) -
-    never surface it in an API response, so a caller can't learn which exact
-    rule to dodge."""
+    None if the text looks safe. Expects `clean_text` output, with its line
+    breaks intact. The label is for internal use (printing) - never surface it
+    in an API response, so a caller can't learn which exact rule to dodge."""
     for pattern in _INJECTION_PATTERNS:
         if pattern.search(text):
             return "prompt_injection"
