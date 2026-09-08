@@ -11,8 +11,10 @@ class Settings:
         self.DOCS_USERNAME = "admin"
         self.DOCS_PASSWORD = "1234"
 
-        # OpenAI / case detection LLM
-        self.OPENAI_MODEL = "gpt-4.1-nano-2025-04-14"
+        # OpenAI / case detection LLM. nano cannot do the two-step reasoning
+        # the secondary case type needs - it echoes the second_remedy question
+        # back instead of answering it - so detection runs on mini.
+        self.OPENAI_MODEL = "gpt-4.1-mini-2025-04-14"
         self.OPENAI_API_KEY = self._get_required("OPENAI_API_KEY")
 
     @staticmethod

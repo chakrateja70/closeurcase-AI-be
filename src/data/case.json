@@ -1,0 +1,96 @@
+[
+  {
+    "category": "Criminal Defense",
+    "case_types": [
+      {"case_type": "Anticipatory Bail", "legal_services": ["File Anticipatory Bail Application", "Anticipatory Bail Hearing", "Anticipatory Bail Appeal"]},
+      {"case_type": "Criminal", "legal_services": ["File Criminal Case", "Criminal Defense", "Criminal Case Consultation", "Criminal Appeal", "Criminal Revision"]},
+      {"case_type": "Cyber Crime", "legal_services": ["Cyber Crime Complaint", "Cyber Fraud Case", "Online Harassment Case", "Cyber Crime Defense", "Cyber Crime Investigation Assistance"]},
+      {"case_type": "Fraud Case", "legal_services": ["File Fraud Case", "Fraud Case Defense", "Financial Fraud Complaint", "Fraud Case Appeal"]},
+      {"case_type": "Litigation", "legal_services": ["Civil Litigation", "Criminal Litigation", "Court Representation", "File Lawsuit", "Litigation Consultation"]},
+      {"case_type": "POCSO Act", "legal_services": ["POCSO Case Filing", "POCSO Case Defense", "POCSO Bail Application", "POCSO Case Representation", "POCSO Appeal"]},
+      {"case_type": "Anti Corruption", "legal_services": ["Anti Corruption Complaint", "Anti Corruption Case Defense", "Vigilance Case", "Anti Corruption Litigation"]},
+      {"case_type": "PMLA", "legal_services": ["PMLA Case Defense", "PMLA Bail Application", "PMLA Property Attachment Matter", "PMLA Case Representation", "PMLA Appeal"]}
+    ]
+  },
+  {
+    "category": "Corporate Law",
+    "case_types": [
+      {"case_type": "Arbitration", "legal_services": ["Arbitration Consultation", "File Arbitration Case", "Arbitration Representation", "Arbitration Award Challenge", "Arbitration Appeal"]},
+      {"case_type": "Startup", "legal_services": ["Startup Legal Consultation", "Business Registration", "Founder Agreement", "Shareholder Agreement", "Startup Compliance"]},
+      {"case_type": "Corporate", "legal_services": ["Corporate Legal Consultation", "Company Law Compliance", "Corporate Dispute", "Board and Shareholder Matters", "Corporate Representation"]},
+      {"case_type": "Breach of Contract", "legal_services": ["Contract Review", "Breach of Contract Notice", "Breach of Contract Case", "Contract Dispute Resolution", "Contract Litigation"]},
+      {"case_type": "NCLT", "legal_services": ["NCLT Case Filing", "NCLT Representation", "Company Petition", "NCLT Appeal", "Corporate Insolvency Matter"]},
+      {"case_type": "Bankruptcy / Insolvency", "legal_services": ["Insolvency Consultation", "Insolvency Proceedings", "Bankruptcy Proceedings", "IBC Case Filing", "Insolvency Representation"]},
+      {"case_type": "Patent", "legal_services": ["Patent Search", "Patent Application", "Patent Registration", "Patent Infringement Case", "Patent Opposition"]},
+      {"case_type": "Media and Entertainment", "legal_services": ["Media Legal Consultation", "Entertainment Contract", "Copyright Dispute", "Defamation Matter", "Media Litigation"]},
+      {"case_type": "Trademark & Copyright", "legal_services": ["Trademark Search", "Trademark Registration", "Trademark Infringement", "Copyright Registration", "Copyright Infringement"]},
+      {"case_type": "Documentation", "legal_services": ["Legal Document Drafting", "Agreement Drafting", "Contract Drafting", "Document Review", "Legal Documentation"]}
+    ]
+  },
+  {
+    "category": "Family Law",
+    "case_types": [
+      {"case_type": "Wills / Trusts", "legal_services": ["Will Drafting", "Will Registration", "Will Review", "Trust Deed Drafting", "Trust Registration"]},
+      {"case_type": "Child Custody", "legal_services": ["Child Custody Case", "Child Custody Petition", "Child Visitation Matter", "Child Custody Dispute", "Child Custody Appeal"]},
+      {"case_type": "Muslim Law", "legal_services": ["Muslim Marriage Matter", "Muslim Divorce Matter", "Muslim Personal Law Consultation", "Muslim Inheritance Matter", "Muslim Family Dispute"]},
+      {"case_type": "Domestic Violence", "legal_services": ["Domestic Violence Complaint", "Domestic Violence Case", "Protection Order", "Domestic Violence Defense", "Domestic Violence Appeal"]},
+      {"case_type": "Succession Certificate", "legal_services": ["Succession Certificate Application", "Succession Certificate Case", "Succession Certificate Consultation", "Succession Certificate Appeal"]},
+      {"case_type": "Divorce", "legal_services": ["File for Divorce", "Reply / Send Legal Notice for Divorce", "Contest Divorce Case", "Divorce Appeal", "Mutual Consent Divorce", "Contested Divorce", "Divorce Settlement"]},
+      {"case_type": "Family", "legal_services": ["Family Dispute", "Family Settlement", "Maintenance Matter", "Family Court Representation", "Family Legal Consultation"]},
+      {"case_type": "Court Marriage", "legal_services": ["Court Marriage Registration", "Marriage Registration", "Special Marriage Act Registration", "Court Marriage Documentation"]},
+      {"case_type": "Dowry Case", "legal_services": ["Dowry Complaint", "Dowry Harassment Case", "Dowry Case Defense", "Dowry Case Representation", "Dowry Case Appeal"]}
+    ]
+  },
+  {
+    "category": "Banking & Finance",
+    "case_types": [
+      {"case_type": "Cheque Bounce", "legal_services": ["Cheque Bounce Legal Notice", "File Cheque Bounce Case", "Cheque Bounce Case Defense", "Cheque Bounce Settlement", "Cheque Bounce Appeal"]},
+      {"case_type": "Recovery", "legal_services": ["Money Recovery Notice", "Debt Recovery Case", "Loan Recovery Matter", "Recovery Suit", "Debt Settlement"]},
+      {"case_type": "Tax", "legal_services": ["Tax Consultation", "Income Tax Matter", "Tax Notice Reply", "Tax Dispute", "Tax Appeal"]},
+      {"case_type": "Banking / Finance", "legal_services": ["Banking Dispute", "Loan Dispute", "Banking Legal Notice", "Financial Agreement Review", "Banking Litigation"]},
+      {"case_type": "GST", "legal_services": ["GST Registration", "GST Notice Reply", "GST Compliance", "GST Dispute", "GST Appeal"]},
+      {"case_type": "Customs & Central Excise", "legal_services": ["Customs Consultation", "Customs Dispute", "Customs Notice Reply", "Central Excise Matter", "Customs Appeal"]}
+    ]
+  },
+  {
+    "category": "Consumer Law",
+    "case_types": [
+      {"case_type": "Insurance", "legal_services": ["Insurance Claim Dispute", "Insurance Claim Rejection", "Insurance Legal Notice", "Insurance Consumer Case", "Insurance Appeal"]},
+      {"case_type": "Medical Negligence", "legal_services": ["Medical Negligence Consultation", "Medical Negligence Complaint", "Medical Negligence Case", "Medical Negligence Consumer Case", "Medical Negligence Defense"]},
+      {"case_type": "Motor Accident", "legal_services": ["Motor Accident Claim", "Motor Accident Compensation", "Motor Accident Case", "Motor Accident Tribunal Matter", "Motor Accident Appeal"]},
+      {"case_type": "Consumer Court", "legal_services": ["Consumer Complaint", "Consumer Legal Notice", "Consumer Court Representation", "Consumer Dispute", "Consumer Court Appeal"]}
+    ]
+  },
+  {
+    "category": "Higher Courts",
+    "case_types": [
+      {"case_type": "Armed Forces Tribunal", "legal_services": ["AFT Case Filing", "AFT Representation", "Service Matter Appeal", "Armed Forces Legal Consultation"]},
+      {"case_type": "Supreme Court", "legal_services": ["Supreme Court Case Filing", "Supreme Court Representation", "Special Leave Petition (SLP)", "Supreme Court Appeal", "Supreme Court Legal Consultation"]},
+      {"case_type": "High Court", "legal_services": ["High Court Case Filing", "High Court Representation", "Writ Petition", "High Court Appeal", "High Court Bail Application", "High Court Legal Consultation"]}
+    ]
+  },
+  {
+    "category": "International Law",
+    "case_types": [
+      {"case_type": "Immigration", "legal_services": ["Immigration Consultation", "Visa Legal Assistance", "Immigration Application", "Immigration Appeal", "Immigration Dispute"]},
+      {"case_type": "International Law", "legal_services": ["International Legal Consultation", "Cross Border Dispute", "International Contract Matter", "International Arbitration", "International Litigation"]},
+      {"case_type": "NRI", "legal_services": ["NRI Legal Consultation", "NRI Property Matter", "NRI Family Dispute", "NRI Documentation", "NRI Power of Attorney"]}
+    ]
+  },
+  {
+    "category": "Labour & Civil Matters",
+    "case_types": [
+      {"case_type": "Labour & Service", "legal_services": ["Employment Dispute", "Wrongful Termination Matter", "Salary / Wage Dispute", "Service Matter", "Labour Court Case"]},
+      {"case_type": "R.T.I", "legal_services": ["RTI Application", "RTI Appeal", "RTI Legal Consultation", "RTI Complaint"]},
+      {"case_type": "Civil", "legal_services": ["Civil Suit", "Civil Dispute", "Civil Litigation", "Civil Appeal", "Civil Legal Notice"]}
+    ]
+  },
+  {
+    "category": "Property Law",
+    "case_types": [
+      {"case_type": "Landlord/Tenant", "legal_services": ["Landlord / Tenant Dispute", "Rent Agreement", "Eviction Matter", "Rent Recovery", "Tenant Rights Matter", "Landlord Rights Matter"]},
+      {"case_type": "Property", "legal_services": ["Property Dispute", "Property Documentation", "Property Verification", "Property Sale Agreement", "Transfer of Ownership", "Property Registration", "Illegal Possession", "Illegal Construction", "Ancestral Property Dispute"]},
+      {"case_type": "RERA", "legal_services": ["RERA Complaint", "RERA Case Filing", "Builder Delay Case", "Builder Fraud Case", "Property Possession Dispute", "RERA Appeal"]}
+    ]
+  }
+]

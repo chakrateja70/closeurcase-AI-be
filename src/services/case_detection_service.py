@@ -1,5 +1,10 @@
 """Case detection: classifies a user query using an OpenAI model constrained
 to the case taxonomy (structured output, ids validated against it again here).
+
+The model returns case-type ids only. Each id is then expanded from the
+taxonomy in `_expand` into the case type, its parent category, and the legal
+services offered under it - so none of those three can contradict each other,
+and the model spends no tokens on the two it does not decide.
 """
 
 from __future__ import annotations
@@ -16,7 +21,11 @@ from openai import (
 )
 
 from src.config.settings import settings
-from src.core.case_categories import FALLBACK_RESPONSE, OTHER_CATEGORY_ID, get_category
+from src.core.case_categories import (
+    FALLBACK_RESPONSE,
+    OTHER_CASE_TYPE_ID,
+    get_case_type,
+)
 from src.core.exceptions import (
     BadGatewayAPIException,
     GatewayTimeoutAPIException,
@@ -131,27 +140,52 @@ class CaseDetectionService:
             return self._invalid(raw.get("fallback_response") or FALLBACK_RESPONSE)
 
         # Schema-constrained, so a miss here means the model claimed valid
-        # without picking a category. Treat it as the catch-all bucket.
-        category = get_category(raw.get("primary_case_category_id")) or get_category(
-            OTHER_CATEGORY_ID
+        # without picking a case type. Treat it as the catch-all bucket.
+        primary = get_case_type(raw.get("primary_case_type_id")) or get_case_type(
+            OTHER_CASE_TYPE_ID
         )
 
-        # Secondary is a second, distinct top-level domain - never the same
-        # as the primary, and only present when the model actually set one.
-        secondary_id = raw.get("secondary_case_category_id")
+        # Secondary is a second, distinct matter - never the same case type as
+        # the primary, though it may sit under the same category (e.g. Divorce
+        # alongside Child Custody). Only present when the model actually set one.
+        secondary_id = raw.get("secondary_case_type_id")
         secondary = (
-            get_category(secondary_id) if secondary_id != category["id"] else None
+            get_case_type(secondary_id) if secondary_id != primary["id"] else None
         )
 
         return {
             "is_valid": True,
-            "primary_case_category": category["title"],
-            "primary_case_category_id": category["id"],
-            "secondary_case_category": secondary["title"] if secondary else None,
-            "secondary_case_category_id": secondary["id"] if secondary else None,
+            **self._expand(primary, "primary"),
+            **self._expand(secondary, "secondary"),
             "confidence": self._confidence(raw.get("confidence")),
             "summary": self._clean_text(raw.get("summary")),
             "fallback_response": None,
+        }
+
+    def _expand(self, case_type: dict | None, slot: str) -> dict:
+        """Flatten one resolved case type into the `slot` half of the response.
+
+        The category it belongs to and the legal services offered under it are
+        both read from the taxonomy here - the model is never asked for either,
+        so neither can disagree with the case type it was mapped from. Services
+        are copied because the taxonomy dicts are module-level and shared.
+        """
+        if case_type is None:
+            return {
+                f"{slot}_case_category": None,
+                f"{slot}_case_category_id": None,
+                f"{slot}_case_type": None,
+                f"{slot}_case_type_id": None,
+                f"{slot}_legal_services": [],
+            }
+        return {
+            f"{slot}_case_category": case_type["category_title"],
+            f"{slot}_case_category_id": case_type["category_id"],
+            f"{slot}_case_type": case_type["title"],
+            f"{slot}_case_type_id": case_type["id"],
+            f"{slot}_legal_services": [
+                dict(service) for service in case_type["legal_services"]
+            ],
         }
 
     def _confidence(self, value) -> float:
@@ -168,10 +202,8 @@ class CaseDetectionService:
     def _invalid(self, fallback_response: str) -> dict:
         return {
             "is_valid": False,
-            "primary_case_category": None,
-            "primary_case_category_id": None,
-            "secondary_case_category": None,
-            "secondary_case_category_id": None,
+            **self._expand(None, "primary"),
+            **self._expand(None, "secondary"),
             "confidence": 0.0,
             "summary": None,
             "fallback_response": fallback_response,

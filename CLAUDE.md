@@ -39,6 +39,7 @@ The empty directories encode the intended separation, and new code should land a
 - `src/services/` — business logic, called from `src/api/`.
 - `src/core/` — cross-cutting app internals. Holds `security.py` (HTTP Basic dependency guarding the docs); exceptions and shared base classes belong here too.
 - `src/db/` — persistence; nothing chosen yet, so a DB decision here is a real architectural choice, not a fill-in.
+- `src/data/` — static data assets loaded at import time. Holds `case.json`, the three-level case taxonomy (category → case_type → legal_services) that `src/core/case_categories.py` parses into ids; edit the JSON, not the Python, to change the taxonomy.
 - `src/prompts/` — LLM prompt templates (the "AI" half of the product; no LLM client is wired up yet).
 - `src/utils/` — generic helpers with no domain knowledge.
 - `src/config/settings.py` — plain `os.getenv` config with defaults; currently just the docs credentials. If it grows, pydantic-settings is the natural fit (pydantic is already a transitive dep).
