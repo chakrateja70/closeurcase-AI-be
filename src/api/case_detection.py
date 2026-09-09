@@ -20,7 +20,7 @@ MAX_QUERY_LENGTH = 600
 class DetectCaseRequest(BaseModel):
     query: str = Field(
         ...,
-        min_length=1,
+        min_length=5,
         max_length=MAX_QUERY_LENGTH,
         description=f"User's description of the issue (max {MAX_QUERY_LENGTH} characters).",
         examples=["My landlord is refusing to return my security deposit after eviction."],
