@@ -142,6 +142,55 @@ def get_case_type(case_type_id: str | None) -> dict | None:
     }
 
 
+def expand_case_type(case_type: dict | None, slot: str) -> dict:
+    """Flatten one resolved case type into the `slot` half of a response.
+
+    The category it belongs to and the legal services offered under it are both
+    read from the taxonomy here - no model is ever asked for either, so neither
+    can disagree with the case type it was mapped from.
+
+    Lives here rather than in a service because both case detection and case
+    summarization emit this same primary/secondary shape, and two copies of it
+    would drift apart the moment either response grew a field. Services are
+    copied because the taxonomy dicts are module-level and shared.
+    """
+    if case_type is None:
+        return {
+            f"{slot}_case_category": None,
+            f"{slot}_case_category_id": None,
+            f"{slot}_case_type": None,
+            f"{slot}_case_type_id": None,
+            f"{slot}_legal_services": [],
+        }
+    return {
+        f"{slot}_case_category": case_type["category_title"],
+        f"{slot}_case_category_id": case_type["category_id"],
+        f"{slot}_case_type": case_type["title"],
+        f"{slot}_case_type_id": case_type["id"],
+        f"{slot}_legal_services": [
+            dict(service) for service in case_type["legal_services"]
+        ],
+    }
+
+
+def resolve_case_types(
+    primary_id: str | None, secondary_id: str | None
+) -> tuple[dict, dict | None]:
+    """Model-supplied ids -> (primary, secondary) taxonomy entries.
+
+    The ids are schema-constrained upstream, so an unknown primary means the
+    model claimed a valid result without picking a case type; that falls back to
+    the catch-all bucket rather than failing the request. The secondary is
+    dropped when it is unknown or merely repeats the primary - it exists to
+    carry a genuinely distinct second matter, not a restatement.
+    """
+    primary = get_case_type(primary_id) or get_case_type(OTHER_CASE_TYPE_ID)
+    secondary = (
+        get_case_type(secondary_id) if secondary_id != primary["id"] else None
+    )
+    return primary, secondary
+
+
 def category_ids() -> list[str]:
     return [category["id"] for category in CASE_CATEGORIES]
 

@@ -27,6 +27,7 @@ from src.core.request_context import RequestContextMiddleware
 from src.core.security import verify_docs_access
 from src.routes import api_router
 from src.services.case_detection_service import CaseDetectionService
+from src.services.case_summarization_service import CaseSummarizationService
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +43,21 @@ async def lifespan(app: FastAPI):
     """
     configure_logging()
     app.state.case_detection_service = CaseDetectionService()
+    app.state.case_summarization_service = CaseSummarizationService()
     logger.info("startup complete")
     try:
         yield
     finally:
-        await app.state.case_detection_service.aclose()
+        # Each close is independent: one failing must not strand the other's
+        # connection pool.
+        for service in (
+            app.state.case_detection_service,
+            app.state.case_summarization_service,
+        ):
+            try:
+                await service.aclose()
+            except Exception:
+                logger.exception("error closing %s", type(service).__name__)
         logger.info("shutdown complete")
 
 

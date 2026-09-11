@@ -6,8 +6,16 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
+    "google-genai>=2.22.0",
     "openai>=3.6.0",
+    # PDF text extraction. BSD-licensed - do NOT swap in PyMuPDF/fitz, which is
+    # AGPL and would infect this service.
+    "pypdf>=6.1.1",
+    "python-docx>=1.2.0",
     "python-dotenv>=1.2.3",
+    # Required by FastAPI to parse multipart uploads; without it the
+    # case_summarization router raises at import, not at request time.
+    "python-multipart>=0.0.20",
     "slowapi>=0.1.10",
     "uvicorn[standard]>=0.52.4",
 ]
