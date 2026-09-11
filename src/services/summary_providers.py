@@ -1,23 +1,3 @@
-"""The two models case summarization can run on, behind one interface.
-
-A caller picks "gpt" or "gemini" per request. Everything that decides *what* the
-summary says - the prompt, the JSON schema, the document framing, the
-normalisation of the result - is shared and lives outside this module, in the
-prompt module and the service. What lives here is only the difference between
-the two SDKs: how a document is attached to a request, how a structured-output
-schema is declared, and which exception means what.
-
-That split is the point. If the prompt or the schema could vary per provider,
-"which model summarises better" would stop being an answerable question. Both
-providers are handed the identical `PromptPayload` and both must return a dict
-matching the same schema; the only asymmetry is the schema *dialect*, and that
-is a mechanical conversion of one source (see `build_gemini_response_schema`).
-
-Both are held to the same output-token ceiling and the same one-retry policy,
-for the same reason - a three-minute call retried twice is worse than a failure
-the caller can act on.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -60,23 +40,14 @@ from src.prompts.case_summary_prompt import (
 
 logger = logging.getLogger(__name__)
 
-# Defined in `config.settings` so that startup validation of SUMMARY_PROVIDER
-# has a list to check against without importing this module (which imports
-# settings). Re-exported here under the names the rest of the tree already
-# uses, so there is one definition and no caller has to know where it lives.
 MODEL_GPT = PROVIDER_GPT
 MODEL_GEMINI = PROVIDER_GEMINI
 SUPPORTED_MODELS = SUPPORTED_SUMMARY_PROVIDERS
 
-# A 30-page filing is a genuinely slow call, so the ceiling is far above the
-# 30s case detection uses. Retries are capped at one deliberately.
 REQUEST_TIMEOUT_SECONDS = 180
 MAX_RETRIES = 1
-# Raised from 8192 when the citable fields started carrying a quotation each.
-# Running out mid-object does not degrade gracefully: the JSON is truncated, so
-# the whole call is lost and reported as cut off after it has been paid for.
-# Output is billed per token generated, so headroom that goes unused is free.
-MAX_OUTPUT_TOKENS = 16384
+
+MAX_OUTPUT_TOKENS = 32768
 
 
 @dataclass(frozen=True)
@@ -108,13 +79,17 @@ class SummaryProvider(Protocol):
     async def aclose(self) -> None: ...
 
 
-def _parse(text: str | None, provider: str) -> dict:
+def parse(text: str | None, provider: str) -> dict:
     """Shared result handling, so a malformed answer fails the same way on both
     providers rather than in two subtly different ways."""
     if not text:
+        # Not truncation - each provider refuses a cut-off answer before this.
+        # An empty answer is a refusal or a safety block, and blaming the
+        # document's length would send the caller after the wrong fix.
+        logger.warning("%s: empty response", provider)
         raise BadGatewayAPIException(
-            "The summary was cut off before it was complete. Please try a "
-            "shorter document."
+            "Case summarization returned no result for this document. Please "
+            "try again, or try a different document."
         )
     try:
         parsed = json.loads(text)
@@ -230,7 +205,7 @@ class OpenAISummaryProvider:
                 "The summary was cut off before it was complete. Please try a "
                 "shorter document."
             )
-        return _parse(response.output_text, self.name)
+        return parse(response.output_text, self.name)
 
 
 # --- Gemini -----------------------------------------------------------------
@@ -277,17 +252,15 @@ class GeminiSummaryProvider:
                 config=genai_types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
                     response_mime_type="application/json",
-                    # `response_json_schema`, not `response_schema`: the latter
-                    # takes an OpenAPI-flavoured subset, this one takes the JSON
-                    # Schema we already build for OpenAI.
+                    # `response_json_schema` takes JSON Schema; `response_schema`
+                    # is a different, OpenAPI-flavoured format.
                     response_json_schema=GEMINI_RESPONSE_SCHEMA,
                     temperature=0,
                     max_output_tokens=MAX_OUTPUT_TOKENS,
-                    # We pass no tools and never want the SDK calling Python
-                    # functions on our behalf. Left at its default the client
-                    # logs a warning recommending AsyncChat on *every* call,
-                    # which buries the real log lines; turning the feature off
-                    # explicitly says what we mean and silences it.
+                    # Off on purpose: Gemini 2.5 counts thinking against
+                    # max_output_tokens, which would leave it a smaller answer
+                    # budget than OpenAI gets from the same constant.
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                     automatic_function_calling=(
                         genai_types.AutomaticFunctionCallingConfig(disable=True)
                     ),
@@ -308,14 +281,37 @@ class GeminiSummaryProvider:
         usage = response.usage_metadata
         if usage:
             logger.info(
-                "gemini usage input=%s output=%s cached=%s total=%s",
+                "gemini usage input=%s output=%s thoughts=%s cached=%s total=%s",
                 usage.prompt_token_count,
                 usage.candidates_token_count,
+                getattr(usage, "thoughts_token_count", None) or 0,
                 usage.cached_content_token_count or 0,
                 usage.total_token_count,
             )
 
-        return _parse(response.text, self.name)
+        self._check_complete(response)
+        return parse(response.text, self.name)
+
+    def _check_complete(self, response) -> None:
+        """Refuse a cut-off answer before trying to parse it."""
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            return
+        finish_reason = candidates[0].finish_reason
+        if finish_reason == genai_types.FinishReason.MAX_TOKENS:
+            logger.error(
+                "gemini: hit the %d output-token ceiling; the answer was "
+                "truncated and is unusable",
+                MAX_OUTPUT_TOKENS,
+            )
+            raise BadGatewayAPIException(
+                "The summary was cut off before it was complete. Please try a "
+                "shorter document."
+            )
+        if finish_reason not in (None, genai_types.FinishReason.STOP):
+            # SAFETY, RECITATION and the like usually arrive with no text; this
+            # log line is the only record of why.
+            logger.warning("gemini: finish_reason=%s", finish_reason)
 
     def _translate(self, exc: genai_errors.APIError) -> Exception:
         """Gemini reports everything as one exception family carrying an HTTP
@@ -332,9 +328,6 @@ class GeminiSummaryProvider:
                 "Case summarization is not configured correctly on the server."
             )
         if status == 400:
-            # A 400 is our request's fault, not the caller's - a schema Gemini
-            # will not accept, or a media type it cannot read. Log loudly: this
-            # is the failure mode a schema change would introduce.
             logger.error("gemini: rejected our request - %s", exc)
             return BadGatewayAPIException(
                 "Case summarization could not process this document. Please try "
@@ -345,15 +338,6 @@ class GeminiSummaryProvider:
             "Case summarization is unavailable. Please try again."
         )
 
-
-# --- Selection --------------------------------------------------------------
-
-
-# Which key each provider needs to be constructible. A provider whose key is
-# absent is left out entirely rather than built and allowed to fail on first
-# use: the service turns a missing provider into a 503 naming what *is*
-# available, which is a far better signal than an auth error surfacing three
-# layers down, and it costs nothing to discover at startup.
 _PROVIDER_BUILDERS = {
     MODEL_GPT: ("OPENAI_API_KEY", OpenAISummaryProvider),
     MODEL_GEMINI: ("GEMINI_API_KEY", GeminiSummaryProvider),
@@ -361,18 +345,7 @@ _PROVIDER_BUILDERS = {
 
 
 def build_providers() -> dict[str, SummaryProvider]:
-    """Every provider that is actually usable on this deployment.
-
-    Both adapters are built whenever both keys are present - that is what makes
-    the per-request `model` override possible. With one key, there is one
-    provider and the override has nothing to switch to, which the service
-    reports as a 503 naming what is available.
-
-    `settings.SUMMARY_PROVIDER` is guaranteed to be among these: settings
-    validates the name at startup and refuses to boot when the selected
-    provider's key is missing. So the default is always constructible, and a
-    request that names no model can always be served.
-    """
+    """Every provider that is actually usable on this deployment."""
     providers: dict[str, SummaryProvider] = {}
     for name, (key_setting, build) in _PROVIDER_BUILDERS.items():
         if getattr(settings, key_setting):

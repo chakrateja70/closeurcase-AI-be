@@ -1,35 +1,47 @@
 """HTTP-level tests for /case_summarization/summarize.
 
 The model call is stubbed out - what these cover is everything around it that
-only exists at the transport layer: multipart handling, the upload-size guard,
-that rejections come back in the shared flat error envelope rather than
+only exists at the transport layer: that the form fields reach the service as
+given, that rejections come back in the shared flat error envelope rather than
 FastAPI's nested {"detail": ...}, and that the rate limit actually applies.
+
+The document now arrives as a URL rather than an upload, so the fetch is
+stubbed here too; what the fetcher itself refuses is `test_url_fetch.py`.
 
 The route is also the one place the slowapi `response` argument is load-bearing:
 omitting it fails at request time, not import time, so only a real request
 catches it.
 """
 
-import io
+from typing import get_args
 
 import pytest
 from fastapi.testclient import TestClient
-from test_document import PLEADING, make_pdf
+from test_document import PLEADING
 
 import main
+from src.api.case_summarization import SummaryModel
 from src.api.deps import get_case_summarization_service
-from src.services.case_summarization_service import CaseSummarizationService
 from src.core.rate_limit import limiter
-from src.services.summary_providers import MODEL_GEMINI, MODEL_GPT
+from src.services.case_summarization_service import CaseSummarizationService
+from src.services.summary_providers import MODEL_GEMINI, MODEL_GPT, SUPPORTED_MODELS
+from src.utils.document import DocumentError
 
 ENDPOINT = "/case_summarization/summarize"
+
+
+def test_the_route_accepts_exactly_the_supported_models():
+    """`SummaryModel` spells the names out because type checkers reject
+    variables inside `Literal`. This keeps that copy honest: rename or add a
+    provider in settings and the route would otherwise reject it silently."""
+    assert set(get_args(SummaryModel)) == set(SUPPORTED_MODELS)
 
 
 class StubService:
     """Stands in for the real service; records what it was handed."""
 
     def __init__(self, default_model: str = MODEL_GPT):
-        self.received: bytes | None = None
+        self.received_url: str | None = None
         self.received_text: str | None = None
         self.model: str | None = None
         self.default_model = default_model
@@ -42,11 +54,12 @@ class StubService:
         self,
         data: bytes | None = None,
         *,
+        url: str | None = None,
         text: str | None = None,
         model: str,
         client: str = "-",
     ) -> dict:
-        self.received = data
+        self.received_url = url
         self.received_text = text
         self.model = model
         return {
@@ -96,18 +109,40 @@ def client(stub):
     main.app.dependency_overrides.clear()
 
 
-def upload(name: str, data: bytes, content_type: str = "application/pdf") -> dict:
-    return {"file": (name, io.BytesIO(data), content_type)}
+DOC_URL = "https://example.org/petition.pdf"
+
+
+class FakeFetcher:
+    """Stands in for the network. Returns preset bytes, or raises the same
+    `DocumentError` a real refusal would - what the real fetcher accepts and
+    refuses is `test_url_fetch.py`."""
+
+    def __init__(self, data: bytes = b"", error: str | None = None):
+        self.data = data
+        self.error = error
+        self.requested: str | None = None
+
+    async def fetch(self, url: str) -> bytes:
+        self.requested = url
+        if self.error:
+            raise DocumentError(self.error)
+        return self.data
+
+    async def aclose(self) -> None:
+        pass
+
+
+def link(url: str = DOC_URL) -> dict:
+    return {"url": url}
 
 
 def form(model: str = MODEL_GPT) -> dict:
-    """`model` is a required form field - there is no default."""
+    """`model` is optional; this is for the tests that pin one."""
     return {"model": model}
 
 
-def test_a_pdf_is_summarised(client, stub):
-    pdf = make_pdf([PLEADING])
-    response = client.post(ENDPOINT, files=upload("petition.pdf", pdf), data=form())
+def test_a_linked_document_is_summarised(client, stub):
+    response = client.post(ENDPOINT, data={**form(), **link()})
 
     assert response.status_code == 200
     body = response.json()
@@ -116,8 +151,9 @@ def test_a_pdf_is_summarised(client, stub):
     assert body["facts_summary"] == "A cheque was dishonoured."
     assert body["chronology"][0]["event"] == "Cheque dishonoured"
     assert body["parties"][0]["name"] == "A Rao"
-    # The route hands the service raw bytes, unaltered.
-    assert stub.received == pdf
+    # The route hands the URL through untouched; fetching is the service's job,
+    # so that it happens after the provider has been resolved.
+    assert stub.received_url == DOC_URL
     assert stub.received_text is None
 
 
@@ -133,43 +169,29 @@ def test_a_validation_error_uses_the_shared_envelope(client):
     assert "detail" not in body
 
 
-def test_an_oversized_upload_is_rejected_without_reaching_the_service(client, stub):
-    from src.utils.document import MAX_FILE_BYTES
-
-    response = client.post(
-        ENDPOINT,
-        files=upload("big.pdf", b"%PDF-" + bytes(MAX_FILE_BYTES)),
-        data=form(),
+def test_a_refused_fetch_becomes_a_400_in_the_shared_envelope():
+    """Whatever the fetcher refuses - too large, private address, 404 - arrives
+    as a `DocumentError`, and every one of them has to land in the same flat
+    envelope a bad upload used to."""
+    response = _real_service_response(
+        fetcher=FakeFetcher(error="That document is too large. The limit is 20 MB."),
+        data=link(),
     )
 
     assert response.status_code == 400
-    assert "too large" in response.json()["error_message"]
-    assert stub.received is None
+    body = response.json()
+    assert set(body) == {"status_code", "status_message", "error_message"}
+    assert "too large" in body["error_message"]
+    assert "detail" not in body
 
 
-def test_an_unsupported_file_is_rejected_in_the_shared_envelope(stub):
-    """The real service here, not the stub: this is the one path that proves a
-    DocumentError becomes a 400 in the shared envelope. It rejects during
-    extraction, so no client call is made and no key is needed.
-
-    It also shows the declared content type does not decide anything - this
-    upload announces itself as a PDF and is still refused on its contents.
-    """
-    # A real service, but with a provider that would raise if reached - the
-    # rejection happens during extraction, so it never is.
-    service = CaseSummarizationService(providers={MODEL_GPT: object()})
-    main.app.dependency_overrides[get_case_summarization_service] = lambda: service
-    limiter.enabled = False
-    try:
-        with TestClient(main.app) as test_client:
-            response = test_client.post(
-                ENDPOINT,
-                files=upload("petition.pdf", b"just some text", "application/pdf"),
-                data=form(),
-            )
-    finally:
-        limiter.enabled = True
-        main.app.dependency_overrides.clear()
+def test_the_url_does_not_decide_what_the_document_is():
+    """The real service, so extraction actually runs. The link ends in .pdf and
+    the bytes are not a PDF - what arrived is decided by the magic bytes, never
+    by the URL, exactly as it was never decided by a filename."""
+    response = _real_service_response(
+        fetcher=FakeFetcher(data=b"just some text"), data=link()
+    )
 
     assert response.status_code == 400
     body = response.json()
@@ -183,24 +205,21 @@ def test_rate_limit_headers_and_429(stub):
     main.app.dependency_overrides[get_case_summarization_service] = lambda: stub
     limiter.enabled = True
     limiter.reset()
-    pdf = make_pdf([PLEADING])
     try:
         with TestClient(main.app) as test_client:
-            first = test_client.post(ENDPOINT, files=upload("a.pdf", pdf), data=form())
+            first = test_client.post(ENDPOINT, data={**form(), **link()})
             assert first.status_code == 200
             assert "x-ratelimit-limit" in first.headers
 
             statuses = [
                 test_client.post(
-                    ENDPOINT, files=upload("a.pdf", pdf), data=form()
+                    ENDPOINT, data={**form(), **link()}
                 ).status_code
                 for _ in range(5)
             ]
             assert 429 in statuses
 
-            limited = test_client.post(
-                ENDPOINT, files=upload("a.pdf", pdf), data=form()
-            )
+            limited = test_client.post(ENDPOINT, data={**form(), **link()})
             assert limited.status_code == 429
             assert "Rate limit exceeded" in limited.json()["error_message"]
     finally:
@@ -222,9 +241,7 @@ def test_detect_endpoint_still_responds(client):
 
 @pytest.mark.parametrize("model", [MODEL_GPT, MODEL_GEMINI])
 def test_the_selected_model_reaches_the_service_and_comes_back(client, stub, model):
-    response = client.post(
-        ENDPOINT, files=upload("a.pdf", make_pdf([PLEADING])), data=form(model)
-    )
+    response = client.post(ENDPOINT, data={**form(model), **link()})
 
     assert response.status_code == 200
     assert stub.model == model
@@ -239,23 +256,21 @@ def test_omitting_the_model_leaves_the_choice_to_the_service(client, stub):
     no model, and the server's SUMMARY_PROVIDER decides. The route must pass
     the omission through as None rather than substituting a name of its own -
     the default belongs to configuration, not to this layer."""
-    response = client.post(ENDPOINT, files=upload("a.pdf", make_pdf([PLEADING])))
+    response = client.post(ENDPOINT, data=link())
 
     assert response.status_code == 200
     assert stub.model is None
 
 
-def test_an_unknown_model_is_rejected_before_the_upload_is_read(client, stub):
+def test_an_unknown_model_is_rejected_before_the_document_is_fetched(client, stub):
     """Validated by the route's Literal, so a typo costs nothing - it never
-    reaches the service, let alone a model."""
+    reaches the service, so no outbound request is made on its behalf."""
     response = client.post(
-        ENDPOINT,
-        files=upload("a.pdf", make_pdf([PLEADING])),
-        data=form("gpt-5-turbo-ultra"),
+        ENDPOINT, data={**form("gpt-5-turbo-ultra"), **link()}
     )
 
     assert response.status_code == 400
-    assert stub.received is None
+    assert stub.received_url is None
 
 
 def test_models_endpoint_lists_what_is_available(client):
@@ -276,9 +291,7 @@ def test_the_grounding_fields_reach_the_client(client, stub):
     """The quote, the pages and the verdict are what let a lawyer check a line
     without reopening the file - so they have to survive serialisation, not
     just exist in the service."""
-    response = client.post(
-        ENDPOINT, files=upload("a.pdf", make_pdf([PLEADING])), data=form()
-    )
+    response = client.post(ENDPOINT, data={**form(), **link()})
 
     assert response.status_code == 200
     event = response.json()["chronology"][0]
@@ -300,28 +313,32 @@ def test_pasted_text_reaches_the_service(client, stub):
 
     assert response.status_code == 200
     assert stub.received_text == PLEADING
-    assert stub.received is None
+    assert stub.received_url is None
 
 
-def test_an_untouched_file_input_alongside_text_is_not_a_file(client, stub):
-    """A browser sends an empty file part for a file input the user never
-    touched. Reading that as "a file was sent" would make it impossible to
-    paste text through any form that carries both fields."""
-    response = client.post(
-        ENDPOINT,
-        files={"file": ("", io.BytesIO(b""), "application/octet-stream")},
-        data={**form(), "text": PLEADING},
-    )
+def test_an_untouched_url_field_alongside_text_is_not_a_url(client, stub):
+    """A form sends an empty string for a field the user never filled in.
+    Reading that as "a URL was given" would make it impossible to paste text
+    through any form carrying both fields."""
+    response = client.post(ENDPOINT, data={**form(), "url": "", "text": PLEADING})
 
     assert response.status_code == 200
     assert stub.received_text == PLEADING
-    assert stub.received is None
+    assert stub.received_url is None
 
 
-def _real_service_response(**kwargs):
+def _real_service_response(fetcher=None, **kwargs):
     """A real service behind the route, with a provider that would raise if
-    reached - these rejections all happen before the model call."""
-    service = CaseSummarizationService(providers={MODEL_GPT: object()})
+    reached - these rejections all happen before the model call - and a fetcher
+    that never touches the network."""
+    # `default_model` pinned rather than inherited: SUMMARY_PROVIDER comes from
+    # the developer's own .env, and a service whose default is not among its
+    # providers answers 503 before it ever reaches the rejection under test.
+    service = CaseSummarizationService(
+        providers={MODEL_GPT: object()},
+        default_model=MODEL_GPT,
+        fetcher=fetcher or FakeFetcher(),
+    )
     main.app.dependency_overrides[get_case_summarization_service] = lambda: service
     limiter.enabled = False
     try:
@@ -332,22 +349,19 @@ def _real_service_response(**kwargs):
         main.app.dependency_overrides.clear()
 
 
-def test_sending_a_file_and_text_together_is_a_400():
-    response = _real_service_response(
-        files=upload("petition.pdf", make_pdf([PLEADING])),
-        data={**form(), "text": PLEADING},
-    )
+def test_sending_a_url_and_text_together_is_a_400():
+    response = _real_service_response(data={**form(), **link(), "text": PLEADING})
 
     assert response.status_code == 400
     assert "not both" in response.json()["error_message"]
 
 
-def test_sending_neither_a_file_nor_text_is_a_400_that_says_what_to_send():
+def test_sending_neither_a_url_nor_text_is_a_400_that_says_what_to_send():
     response = _real_service_response(data=form())
 
     assert response.status_code == 400
     message = response.json()["error_message"]
-    assert "Upload" in message and "paste" in message
+    assert "URL" in message and "paste" in message
 
 
 def test_text_below_the_floor_is_rejected_before_the_model():

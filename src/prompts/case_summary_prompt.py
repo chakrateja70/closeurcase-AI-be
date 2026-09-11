@@ -2,10 +2,9 @@ from functools import lru_cache
 
 SCHEMA_NAME = "case_summary"
 
-# The roles a document actually gives a party. Kept as a schema enum so the
-# model cannot invent an eleventh label the frontend has no rendering for, and
-# so "the document does not say" has somewhere to go other than a guess: that
-# is what "other" is for, and the prompt says so explicitly.
+# Fixed party-role enum; `other` covers unstated or unrecognised roles and is
+# also used by `_settle_roles` as the fallback.
+PARTY_ROLE_OTHER = "other"
 PARTY_ROLES = [
     "petitioner",
     "respondent",
@@ -16,7 +15,7 @@ PARTY_ROLES = [
     "accused",
     "applicant",
     "third_party",
-    "other",
+    PARTY_ROLE_OTHER,
 ]
 
 # Facts and allegations are ONE list with a discriminator rather than two
@@ -66,10 +65,13 @@ SYSTEM_PROMPT = """
     * chronology: what happened - dated events in the order they occurred,
     earliest first. Be thorough and include every dated event the document
     mentions.
-    * facts_summary: what the dispute is - 2 to 4 short paragraphs in plain
-    English, third person, explaining how it arose, written so a reader who has
-    not opened the document understands the situation. Plain language, not
-    legalese. No advice and no opinion on who is right.
+    * facts_summary: what the dispute is - AT MOST 120 WORDS, in one or two
+    short paragraphs of plain English, third person: how the parties came to be
+    in dispute and what each side wants. Where the document is a judgment or
+    order, end with one sentence stating what the court decided, without its
+    reasoning. No headings, no bullet points, no section numbers or case
+    citations, and do not recount the court's analysis of the law. Plain
+    language, not legalese. No advice and no opinion on who is right.
     * assertions: what the parties are arguing - the discrete things the
     document asserts, one sentence each, in the order the document makes them.
     Mark each one "allegation" where a party asserts it against another - a
@@ -81,7 +83,7 @@ SYSTEM_PROMPT = """
     * confidence: 0.0-1.0, how well the document supports this summary. Use
     below 0.5 when it is partial, badly scanned, or largely illegible.
     * fallback_response: when is_valid is false, one sentence saying what is
-    wrong with the upload and what to send instead; null when is_valid is true.
+    wrong with the document and what to send instead; null when is_valid is true.
 
     When is_valid is false, every other field must be null or an empty array.
 
@@ -120,13 +122,6 @@ SYSTEM_PROMPT = """
 
 
 # --- Schema -----------------------------------------------------------------
-#
-# OpenAI strict mode has two rules that bite here: every property must appear in
-# `required`, and every object - including the item schema of an array - needs
-# `additionalProperties: False`. "Optional" is therefore expressed as a nullable
-# type, never by leaving a field out, which happens to be exactly what the
-# grounding rule wants. The small builders below exist so those two rules are
-# satisfied in one place rather than restated at every call site.
 
 
 def _nullable_string(description: str) -> dict:
@@ -146,25 +141,11 @@ def _array_of(item_schema: dict, description: str) -> dict:
     return {"type": "array", "description": description, "items": item_schema}
 
 
-# There is deliberately no page-number field anywhere in this schema. Pages are
-# worked out in `utils.grounding` from where each quotation actually turns out
-# to be, so the model is given no opportunity to supply one - the surest way to
-# guarantee a page number is never guessed is not to ask for it.
-
-
 def _grounded(properties: dict) -> dict:
     """An array item that has to quote the document it came from.
-
     The quote is the entry's whole claim to being real: `utils.grounding` looks
     for it in the text we extracted ourselves, stamps the entry verified or
     not, and reports the pages it was found on.
-
-    Note the two things NOT asked for here. The model is never asked whether
-    its own answer is correct, because a model rating its own output is not
-    evidence of anything. And it is never asked for a page number: page numbers
-    are derived from where the quote turns out to be, so there is no field
-    through which a guessed one could arrive. Both verdicts are computed after
-    the call, from the quote alone.
     """
     return _object(
         {
@@ -221,7 +202,8 @@ def build_response_schema() -> dict:
             "What happened: dated events in the order they occurred, earliest first.",
         ),
         "facts_summary": _nullable_string(
-            "What the dispute is: 2-4 short plain-English paragraphs."
+            "What the dispute is: at most 120 words, in one or two "
+            "plain-English paragraphs. No headings, lists or citations."
         ),
         "assertions": _array_of(
             _grounded(
@@ -255,24 +237,6 @@ def build_response_schema() -> dict:
         ),
     }
     return _object(properties)
-
-
-# --- The same schema, in the dialect Gemini accepts -------------------------
-#
-# Both providers must be held to an identical contract, or "which model is
-# better" stops being answerable - so there is ONE schema, built above, and this
-# converts it rather than maintaining a second copy that could drift.
-#
-# Gemini's `response_json_schema` takes standard JSON Schema but supports only a
-# subset of it. The two constructs that fall outside that subset are both about
-# nullability:
-#
-#   {"type": ["string", "null"]}            - a type ARRAY
-#   {"type": [...], "enum": [..., None]}    - a null member in an enum
-#
-# `anyOf` is supported, so both become an explicit union with a null branch.
-# Everything else - additionalProperties, required, properties, items, enum of
-# strings, description - passes through untouched.
 
 _NULL_BRANCH = {"type": "null"}
 

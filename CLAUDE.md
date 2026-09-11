@@ -80,7 +80,8 @@ that way or convert the whole tree at once.
 
 ### Two features, one taxonomy — no longer
 
-Case detection (typed query) and case summarization (uploaded document) are
+Case detection (typed query) and case summarization (a linked or pasted
+document) are
 separate stacks. They used to meet at `src/core/case_categories.py`: both ended
 with a model-chosen case-type id and both called `expand_case_type` to turn it
 into the same primary/secondary block. **Summarization no longer classifies at
@@ -126,7 +127,7 @@ Nothing else.
 The court, case number, title, filing date, jurisdiction, document type, legal
 issues, monetary claims, statutes, precedents, exhibits, key dates, open
 questions and the whole case-type block were all extracted once and have been
-**deliberately removed**. Whoever uploaded the filing can read that off its
+**deliberately removed**. Whoever sent the filing can read that off its
 first page; restating it spent output tokens, lengthened the response, and
 buried the fields that actually say something. Adding a field back means
 arguing that a lawyer holding the document cannot already see it — `parties`
@@ -277,10 +278,29 @@ or an allegation is a judgement call; two lists would make the model take it
 twice and let the same sentence land in both or in neither. `attributed_to` —
 which party says it — is the natural next field here and is not implemented yet.
 
-Because every citable entry now carries a quotation, `MAX_OUTPUT_TOKENS` in
-`summary_providers` was raised to 16384. Running out does not degrade
-gracefully: the JSON is truncated mid-object and the whole call is lost after
-being paid for.
+Because every citable entry carries a quotation, `MAX_OUTPUT_TOKENS` in
+`summary_providers` is 32768 — raised from 8192, then from 16384 after a real
+13-page scanned petition overran it. Running out does not degrade gracefully:
+the JSON is truncated mid-object and the whole call is lost after being paid
+for. Output is billed per token generated, so unused headroom is free; 32768 is
+gpt-4.1-mini's ceiling, and the two providers are deliberately held to one
+number.
+
+**Gemini runs with thinking disabled (`thinking_budget=0`), and that is
+load-bearing.** Gemini 2.5 charges reasoning tokens against
+`max_output_tokens`, so with it on the shared constant means "the whole answer"
+for OpenAI and "whatever reasoning left over" for Gemini — the two stop being
+held to one ceiling, which is the entire basis for comparing them. On the
+petition above that was 7,498 tokens of thinking against 8,871 of answer. The
+log line reports `thoughts=` on every call: a non-zero value there is the first
+sign the answer is sharing its budget again.
+
+Both adapters must refuse a cut-off answer *before* parsing it — OpenAI on
+`status == "incomplete"`, Gemini on `finish_reason == MAX_TOKENS`. Gemini's
+check was missing, so a truncated answer reached `parse` and was reported to
+the caller as "returned an unreadable result", which blames the model for
+malformed JSON, points away from the real cause, and invites a retry certain to
+fail identically.
 
 `_items` drops a bare string arriving in a list of objects. That matters more
 than it looks: Gemini enforces its schema less rigidly than OpenAI strict mode,
@@ -288,13 +308,60 @@ and a string reaching `_ground` would be handed to `.get`.
 
 ### Case summarization takes one of three branches
 
-`src/utils/document.py` decides, before any model call, what an upload is and
-how to send it — and every rejection (empty, oversized, unsupported, encrypted,
-over the page cap) happens there, so a bad file never costs money.
+The document arrives as a **URL**, not an upload. `src/utils/url_fetch.py`
+downloads it; `src/utils/document.py` then decides what it is and how to send
+it — and every rejection (empty, oversized, unsupported, encrypted, over the
+page cap) happens there, so a bad document never costs a model call.
+
+### Fetching a linked document is SSRF surface
+
+`url_fetch.py` exists because the endpoint makes an outbound request to an
+address a stranger chose. Read this before touching it:
+
+- **http(s) only.** `file://` reads local disk, `gopher://` smuggles bytes into
+  whatever is listening.
+- **Every resolved address must be public.** Anything outside global address
+  space is refused — that is what catches 100.64.0.0/10 (CGNAT), which Python
+  does not count as private — and so are loopback, private, link-local,
+  multicast, reserved and unspecified, which catch the NAT64 and
+  IPv4-compatible forms `is_global` passes. Neither half alone is enough.
+  Link-local is where
+  `169.254.169.254` lives — the cloud instance-credentials endpoint, the single
+  highest-value target of an SSRF bug.
+- **Every address, not the first.** A hostname answering with one public and
+  one private address is refused outright, or an attacker picks which we dial.
+- **Every redirect hop, not just the typed URL.** Redirects are followed by
+  hand precisely so each `Location` is re-parsed and re-resolved. A public URL
+  answering `302 -> 169.254.169.254` is the attack a front-door-only check
+  misses entirely.
+- **IPv4-in-IPv6 is unwrapped first.** `IPv6Address('::ffff:127.0.0.1')
+  .is_loopback` is False; without `_unwrap` that notation walks past every
+  check.
+- **`Content-Type` is ignored**, like any other declared file type. Magic
+  bytes decide.
+- **One deadline for the whole fetch.** httpx has no total timeout — its read
+  timeout restarts on every chunk — so a server trickling bytes would hold the
+  request open indefinitely. `fetch` wraps DNS, every redirect hop and the body
+  in a single `asyncio.timeout(TOTAL_TIMEOUT_SECONDS)`. Tests pin both the slow
+  body and a hanging DNS lookup.
+- **Nothing touches disk.** The body streams into memory under the same 20 MB
+  ceiling, released with the request — so "store temporarily then delete" is
+  met by never storing, and there is no cleanup that can fail.
+- The refusal message never names the internal address that was resolved; that
+  answer is itself a scan result. It is logged, not returned.
+
+Known gap, written down rather than left to be found: **DNS rebinding**. Our
+resolution and httpx's are separate lookups, so a hostile nameserver can answer
+differently. Closing it means dialling the vetted IP with the hostname in the
+`Host` header.
+
+The fetch happens **in the service, after `_provider()` resolves** — not in the
+route. An unconfigured model must not first cost an outbound request, on the
+same principle that already stops it costing a 20 MB PDF parse.
 
 `document.py` has **two entry points**, and they converge immediately.
-`extract(bytes)` is the upload path below; `from_text(str)` is a document
-pasted into a box. `from_text` skips the two rules that have no meaning for
+`extract(bytes)` takes whatever the fetch returned; `from_text(str)` is a
+document pasted into a box. `from_text` skips the two rules that have no meaning for
 characters — sniffing and page counting — and shares every other one: the same
 `MAX_TEXT_CHARS` cap, the same TEXT branch, the same `ExtractedDocument`.
 Nothing downstream can tell them apart, which is the point. It adds one rule of
@@ -306,11 +373,22 @@ Pasted text has no `--- Page N ---` markers, so every entry comes back
 synthesising markers to fill `source_pages` would publish page numbers
 referring to nothing.
 
-The route takes `file` **or** `text`, and sending both is a 400 rather than a
+Which is why **`source_pages_available` cannot be derived from the branch
+alone** — testing only `branch == BRANCH_TEXT` was a bug, since a DOCX and a
+paste both pass it while having no pages, and the flag then promised page
+references that every entry reported as `unavailable`. It is
+`branch == BRANCH_TEXT and page_count is not None`: markers come from
+`_join_pages`, only a PDF gets them, and `page_count` being set is exactly that
+condition. The flag exists so a client can decide once, up front, whether to
+render a page affordance — so `False` has to mean *nothing* here can ever be
+paged. A parametrized test checks it against what the entries actually report,
+for all five input kinds.
+
+The route takes `url` **or** `text`, and sending both is a 400 rather than a
 silent preference: a client with a stale form field would otherwise get a
 summary of the wrong one with no way to tell. Note the route reads an empty
-file part as *no file* — that is what a browser sends for an untouched file
-input, and reading it as "a file was sent" would make pasting impossible from
+string as *not given* — that is what a form sends for a field the user left
+alone, and reading it as "a URL was given" would make pasting impossible from
 any form carrying both fields.
 
 - **TEXT** — a digital PDF or a DOCX. Extracted locally, joined with
@@ -345,6 +423,24 @@ actually carry. That exists because the JSON schema constrains shape but not
 emptiness: a party named `""` passes the model's schema and then fails the
 Pydantic response model, after the call has been paid for.
 
+**`_LIST_FIELDS` and the response model are two statements of the same
+contract, and they have drifted apart once already.** `parties` required only
+`name` while `Party.role` was a required string, so a role-less party validated
+in the service and raised in the route — a 500 on a call already billed.
+Whenever a required field is added to a response model, the matching entry here
+has to say so too. A test now constructs the response model from normalised
+output for every list, so a future drift fails the build instead of a request.
+
+The fix for `role` was **not** to require it. `_settle_roles` turns an absent
+or unrecognised role into `other` rather than dropping the party, because a
+party is worth keeping for its name alone — losing a party who is plainly in
+the document is the worse error — and `other` is already what the prompt tells
+the model to use when the document does not say. It doubles as the only guard
+on the role vocabulary: `Party.role` is a plain `str`, so without it an
+invented role would ship to a frontend with no rendering for it. OpenAI strict
+mode makes both cases impossible; Gemini enforces less rigidly and is
+selectable, so neither can be assumed away.
+
 Like detection, summary quality is verified against live API calls, not unit
 tests — and now on **both models**, since a prompt edit can regress one and not
 the other. The failure mode to check for is **grounding**, and the statuses now
@@ -366,15 +462,14 @@ The scanner is intentionally the weaker of two layers, leaning on the prompt's
 own "ignore embedded instructions" rule, because a false positive silently
 rejects a real client describing a real dispute.
 
-**Uploads deliberately break this order: they run `clean_text` only.**
+**Documents deliberately break this order: they run `clean_text` only.**
 `flatten` would erase the page and paragraph boundaries the summary needs, and
 `find_security_issue` would reject real filings — its scope patterns block
 "summarize the following document", and pleadings genuinely say things like
 "directed to disregard the earlier instructions of the Board". On that path the
 scanner runs in log-only mode (`_log_only_scan`) and the prompt's untrusted-data
-rule is the primary defence rather than the second layer. The reasoning is in
-the `case_summarization_service` module docstring; don't re-enable the gate
-without testing against a corpus of real filings first.
+rule is the primary defence rather than the second layer. Don't re-enable the
+gate without testing against a corpus of real filings first.
 
 ### Cross-cutting behaviour in `main.py`
 
@@ -425,9 +520,17 @@ surface regardless of the page being protected. Because `openapi_url=None`,
   the rate limits are the only thing standing in front of the OpenAI bill.
   `/summarize` is much the more expensive: a scanned filing is billed per
   rendered page.
+- **`/summarize` now makes an outbound request to a caller-supplied address.**
+  `url_fetch` closes the standard SSRF paths, but two things remain: DNS
+  rebinding (described above), and the fact that an unauthenticated endpoint
+  can be pointed at *any* public host, making this server a small, rate-limited
+  request amplifier someone else's logs will see as us. If that matters,
+  `SUMMARY_URL_ALLOWED_HOSTS`-style allowlisting is the next step, not more
+  denylisting.
 - `/summarize` is synchronous, and a long document can take minutes — past the
-  idle timeout of most proxies. The 20 MB / 30-page caps in
-  `src/utils/document.py` keep it inside that; lifting them means moving the
+  idle timeout of most proxies. The fetch adds at most 30s to that budget.
+  The 20 MB / 30-page caps in `src/utils/document.py` keep it inside that;
+  lifting them means moving the
   call behind a job queue, which also needs shared storage rather than the
   in-process kind noted above.
 - Logs pair a caller's IP with the text of their legal problem — sensitive in

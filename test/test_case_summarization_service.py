@@ -22,6 +22,7 @@ import pytest
 from test_document import PLEADING, make_pdf
 
 from src.api.case_summarization import SummarizeDocumentResponse
+from src.prompts.case_summary_prompt import PARTY_ROLE_OTHER, PARTY_ROLES
 from src.core.exceptions import BadRequestAPIException
 from src.core.exceptions import ServiceUnavailableAPIException
 from src.services.case_summarization_service import (
@@ -620,12 +621,15 @@ def test_pasted_text_verifies_quotes_but_cannot_page_them(service, provider):
 
     assert event["validation_status"] == "verified"
     assert (event["source_pages"], event["page_status"]) == ([], "unavailable")
-    assert result["source_pages_available"] is True
+    # And the response says so up front rather than per entry. Reporting True
+    # here - as this did until the flag was fixed - promised a client page
+    # references that every entry then refused to supply.
+    assert result["source_pages_available"] is False
     assert result["page_count"] is None
 
 
 @pytest.mark.anyio
-async def test_sending_both_a_file_and_text_is_a_400(service):
+async def test_sending_two_sources_is_a_400(service):
     """Not a silent preference: a client with a stale form field would
     otherwise get a summary of the wrong one with no indication which."""
     with pytest.raises(BadRequestAPIException) as excinfo:
@@ -642,7 +646,7 @@ async def test_sending_neither_is_a_400_that_says_what_to_send(service):
         await service.summarize_document(model=MODEL_GPT)
 
     message = excinfo.value.detail["error_message"]
-    assert "Upload" in message and "paste" in message
+    assert "URL" in message and "paste" in message
 
 
 @pytest.mark.anyio
@@ -774,3 +778,144 @@ async def test_the_pipeline_is_identical_however_the_provider_was_chosen(
 
     assert gpt.payload.instruction == service._build_payload(digital_pdf, "t").instruction
     assert gpt.payload.inline_data is None
+
+
+# --- The parties contract ----------------------------------------------------
+#
+# `parties` is the one list whose required keys and whose response model had
+# drifted apart: `_LIST_FIELDS` demanded only a name while `Party.role` was a
+# required string, so a role-less party validated here and raised in the route,
+# after the call had been paid for. OpenAI strict mode makes that impossible;
+# Gemini does not, and Gemini is selectable.
+
+
+def test_a_party_without_a_role_is_kept_and_settled_to_other(
+    service, provider, digital_pdf
+):
+    """Kept, not dropped. A party is worth having for its name alone - losing
+    "A Rao" because the model omitted which side he is on would remove from the
+    summary a party who is plainly in the document, which is the worse error.
+    "other" is not invented here either: it is what the prompt already tells
+    the model to use when the document does not say."""
+    raw = model_output(parties=[{"name": "A Rao"}])
+    result = service._normalise(raw, digital_pdf, provider)
+
+    assert result["parties"] == [{"name": "A Rao", "role": PARTY_ROLE_OTHER}]
+    as_response(result)
+
+
+@pytest.mark.parametrize(
+    "role", ["witness", "landlord", "", None, "PLAINTIFF", 7, [], "other "]
+)
+def test_an_unrecognised_role_never_reaches_the_client(
+    service, provider, digital_pdf, role
+):
+    """`Party.role` is typed as a plain string, so nothing downstream would
+    reject a role the frontend has no rendering for. This is the only place
+    that can catch it."""
+    result = service._normalise(
+        model_output(parties=[{"name": "A Rao", "role": role}]), digital_pdf, provider
+    )
+
+    assert result["parties"][0]["role"] == PARTY_ROLE_OTHER
+    as_response(result)
+
+
+@pytest.mark.parametrize("role", PARTY_ROLES)
+def test_every_taxonomy_role_survives_untouched(
+    service, provider, digital_pdf, role
+):
+    result = service._normalise(
+        model_output(parties=[{"name": "A Rao", "role": role}]), digital_pdf, provider
+    )
+
+    assert result["parties"][0]["role"] == role
+
+
+def test_a_party_without_a_name_is_still_dropped(service, provider, digital_pdf):
+    """The name is the substance; settling the role does not rescue an entry
+    that carries nothing. `name` is a required string downstream, so a blank
+    one would fail validation after the model call was paid for."""
+    raw = model_output(
+        parties=[
+            {"name": "A Rao", "role": "plaintiff"},
+            {"name": "   ", "role": "defendant"},
+        ]
+    )
+    result = service._normalise(raw, digital_pdf, provider)
+
+    assert [party["name"] for party in result["parties"]] == ["A Rao"]
+    as_response(result)
+
+
+def test_every_list_entry_satisfies_the_response_model(
+    service, provider, digital_pdf
+):
+    """The invariant both halves of this serve: whatever normalisation emits
+    must construct. A mismatch between `_LIST_FIELDS` and the response model
+    surfaces as a 500 in the route, after the call has been billed."""
+    raw = model_output(
+        parties=[{"name": "A Rao"}, {"name": "B Naidu", "role": "nonsense"}],
+        chronology=[{"event": "Cheque issued", "source_snippet": None}],
+        assertions=[{"statement": "It bounced.", "statement_type": "fact"}],
+    )
+    response = as_response(service._normalise(raw, digital_pdf, provider))
+
+    assert [p.role for p in response.parties] == [PARTY_ROLE_OTHER, PARTY_ROLE_OTHER]
+
+
+# --- source_pages_available must agree with what the entries report ----------
+
+
+@pytest.mark.parametrize(
+    "make_document, expected",
+    [
+        (lambda: extract(make_pdf([PLEADING, PLEADING])), True),
+        (lambda: from_text(PLEADING), False),
+        (
+            lambda: ExtractedDocument(
+                kind="docx",
+                branch=BRANCH_TEXT,
+                media_type="application/msword",
+                data=b"PK",
+                text=PLEADING,
+            ),
+            False,
+        ),
+        (scanned_pdf, False),
+        (
+            lambda: ExtractedDocument(
+                kind="png", branch=BRANCH_IMAGE, media_type="image/png", data=b"\x89PNG"
+            ),
+            False,
+        ),
+    ],
+    ids=["digital_pdf", "pasted_text", "docx", "scanned_pdf", "image"],
+)
+def test_the_flag_matches_whether_any_entry_can_be_paged(
+    service, provider, make_document, expected
+):
+    """The bug this replaces tested the branch alone, which a DOCX and a paste
+    both pass while having no pages. The flag has to mean what a client will
+    actually observe per entry, or it is worse than absent: it tells them to
+    render a page reference that never arrives."""
+    result = service._normalise(model_output(), make_document(), provider)
+
+    assert result["source_pages_available"] is expected
+
+    paged = [
+        entry
+        for field in GROUNDED_FIELDS
+        for entry in result[field]
+        if entry["page_status"] == "mapped"
+    ]
+    # False must mean *nothing* can be paged; True only that it is possible.
+    assert expected or not paged
+
+
+def test_the_invalid_path_never_promises_pages(service, provider, digital_pdf):
+    """Overridden deliberately: there are no entries on this path, so nothing
+    can carry a page whatever branch the document took."""
+    result = service._normalise({"is_valid": False}, digital_pdf, provider)
+
+    assert result["source_pages_available"] is False

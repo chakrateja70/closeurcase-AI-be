@@ -1,7 +1,7 @@
 # Closeurcase AI Backend
 
 A FastAPI service that reads a legal problem — as plain, often messy English, or
-as an uploaded court document — and works out what it is.
+as a court document you link to — and works out what it is.
 
 Give it *"someone hit and ran away, the person sitting behind me died"* and it
 comes back with **Motor Accident** — and, because a hit-and-run is two legal
@@ -9,10 +9,10 @@ matters rather than one, a secondary of **Criminal**. Along with each it
 returns the legal services that apply, so the frontend can route the person to
 the right kind of help without a second request.
 
-Hand it a petition instead and it returns the same classification wrapped
-around a structured brief: the parties, the court, a dated chronology, the
-statutes relied on, what the filing asks for, and a plain-English account of
-the dispute.
+Link it to a petition instead and it answers three questions about it: what
+happened, as a dated chronology; what the dispute is, in plain English; and
+what the parties are arguing. Every line of that carries the words from the
+document that support it, checked back against the text we extracted.
 
 ## What it does
 
@@ -22,13 +22,13 @@ Two features, four endpoints.
 `GET /case_detection/categories` returns the full taxonomy — 10 categories, 50
 case types, 247 legal services — which is what the frontend renders as menus.
 
-**Case summarization.** `POST /case_summarization/summarize` takes an uploaded
-document (PDF, DOCX, JPG or PNG) and returns a structured brief plus a
-narrative summary — and the same case type and services a typed query would
-get, so a summarized document routes exactly like a described one. It runs on
-**GPT or Gemini, chosen per request**; `GET /case_summarization/models` says
-which are available. Both are given the same prompt and held to the same
-schema, so the only difference in the output is the model.
+**Case summarization.** `POST /case_summarization/summarize` takes a **link** to
+a document (PDF, DOCX, JPG or PNG) — or the text pasted directly — and returns a
+narrative summary plus the lists that carry the argument, each entry quoting the
+document it came from. It runs on **GPT or Gemini**, whichever `SUMMARY_PROVIDER`
+names, overridable per request; `GET /case_summarization/models` says which are
+available. Both are given the same prompt and held to the same schema, so the
+only difference in the output is the model.
 
 Everything runs through a model constrained by a JSON schema, so none of them
 can answer with a case type that doesn't exist. Everything else in the
@@ -69,21 +69,41 @@ curl -X POST http://localhost:8000/case_detection/detect \
 }
 ```
 
-And with a document. Send it **either** as `file` or as `text`, never both:
+And with a document. Send it **either** as `url` or as `text`, never both:
 
 ```bash
 # no model named: runs on whatever SUMMARY_PROVIDER says
-curl -F "file=@petition.pdf" \
+curl -F "url=https://example.org/petition.pdf" \
   http://localhost:8000/case_summarization/summarize
 
-# or paste the text instead of uploading anything
+# or paste the text instead of linking to anything
 curl -F "text=$(cat petition.txt)" \
   http://localhost:8000/case_summarization/summarize
 
 # `model` overrides the configured provider for one request
-curl -F "file=@petition.pdf" -F "model=gemini" \
+curl -F "url=https://example.org/petition.pdf" -F "model=gemini" \
   http://localhost:8000/case_summarization/summarize
 ```
+
+The server downloads the link into memory, summarises it, and **keeps
+nothing** — the bytes are released when the request ends and never touch disk,
+so there is no temporary file to clean up and nothing left behind if the
+process dies mid-request. What kind of document arrived is decided by its magic
+bytes, never by the URL extension or the server Content-Type.
+
+Because the server makes an outbound request on a caller behalf, the link is
+constrained. It must be `http(s)` and must resolve to a **public** address:
+loopback, private, link-local (where cloud instance-credential endpoints live),
+multicast and reserved ranges are refused, and the check is repeated on every
+redirect hop — a public URL answering `302 -> 169.254.169.254` is caught. A
+hostname resolving to one public *and* one private address is refused outright.
+A link behind a login gets a message saying so rather than a summary of the
+sign-in page.
+
+> The remaining gap is DNS rebinding: between our resolution and the one httpx
+> makes, a hostile nameserver can answer differently. Closing it means dialling
+> the vetted IP with the hostname in the `Host` header. Narrow, real, and
+> written down rather than left to be discovered.
 
 **`model` is optional.** Which model summarises is a deployment decision —
 `SUMMARY_PROVIDER` in `.env` — so an ordinary client doesn't name one and
@@ -149,7 +169,7 @@ submit `hi` and the call gets billed either way.
 arguing (`assertions`) — plus `parties`, naming who is arguing, because the
 other three read as anonymous
 without it. The court, the case number, the statutes, the precedents, the
-exhibits and the hearing dates are deliberately not extracted: whoever uploaded
+exhibits and the hearing dates are deliberately not extracted: whoever sent
 the filing can read those off its first page, and restating them made the
 response long without making it more useful.
 
@@ -231,9 +251,10 @@ uv run pytest -k newline     # one test by name
 ```
 
 The suite covers the parts where a subtle mistake stops protecting anything or
-costs money quietly: input sanitization, file identification and the upload
-rejections, and the normalisation layer where the model's schema and the API's
-response model can disagree.
+costs money quietly: input sanitization, file identification and the fetch
+rejections (including every SSRF path — private addresses, the cloud metadata
+host, redirects into both), and the normalisation layer where the model's
+schema and the API's response model can disagree.
 
 Neither classification nor summarization *quality* is unit-tested — both are
 checked by running real inputs against the API, because prompt changes regress
@@ -257,7 +278,7 @@ main.py                              app, middleware, error handlers, lifespan
     ├── services/     result normalisation, and one file per model provider
     ├── prompts/      prompt text + the JSON schema, both built from the taxonomy
     ├── core/         security, exceptions, rate limiting, logging, taxonomy
-    ├── utils/        input sanitization, uploaded-document handling
+    ├── utils/        input sanitization, document handling, URL fetching
     └── data/case.json    ← the taxonomy itself
 ```
 
@@ -314,13 +335,13 @@ with no text layer at all. If a PDF yields too little text per page, it's sent
 to the model as the file itself and read as rendered pages. One code path, two
 branches, no OCR infrastructure to run.
 
-**Uploads are sanitized differently from typed queries, on purpose.** A query
+**Documents are sanitized differently from typed queries, on purpose.** A query
 runs `clean_text → find_security_issue → flatten`; a document runs `clean_text`
 only. Flattening would destroy the page and paragraph boundaries the model
 needs to build a chronology, and the injection scanner would reject real
 filings — its rules block phrases like *"summarize the following document"*,
 and genuine pleadings say things like *"directed to disregard the earlier
-instructions of the Board"*. On uploads the scanner runs in log-only mode and
+instructions of the Board"*. On documents the scanner runs in log-only mode and
 the prompt's own "this is data, not instructions" rule does the work.
 
 **The two endpoints that spend money are rate limited, separately.** Health
@@ -347,9 +368,8 @@ Some things are fine for development and are not fine in production:
   `RATE_LIMIT_STORAGE` at a `redis://` URL to fix that.
 - **Logs record the caller's IP next to the text of their legal problem.** In
   this domain that's divorces, criminal charges, domestic violence. Decide on
-  retention, and consider dropping the full-query lines to `DEBUG`. Uploads
-  already log only size, page count and branch — never the document text or
-  the filename, which routinely carries a client's name.
+  retention, and consider dropping the full-query lines to `DEBUG`. Documents
+  already log only size, page count and branch — never the document text.
 - **Behind a proxy, run with `--proxy-headers --forwarded-allow-ips=<proxy>`.**
   Otherwise every request looks like it came from the proxy and shares one rate
   limit bucket.

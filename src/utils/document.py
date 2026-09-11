@@ -1,8 +1,11 @@
-"""Uploaded-document handling: identify, validate, and get text out.
+"""Document handling: identify, validate, and get text out.
 
 Generic and domain-free, like `helper.py` - nothing here knows what a petition
-is. It answers one question: given raw uploaded bytes, what is this file and
-how should it be put in front of a model?
+is, and nothing here knows where the bytes came from. It answers one question:
+given raw bytes, what is this file and how should it be put in front of a
+model? The bytes reach it from `utils.url_fetch`, which downloads what the
+caller linked to; keeping this module ignorant of that is what lets the same
+code path serve a fetch, a test, or an upload if one is ever reinstated.
 
     bytes -> sniff -> PDF   -> pypdf text -> enough text? -> TEXT branch
                    |                      \\-> too little  -> FILE branch
@@ -12,7 +15,7 @@ how should it be put in front of a model?
     str ------------------------------------------------------> TEXT branch
 
 `from_text` is the second entry point, for a document pasted into a box rather
-than uploaded. It skips sniffing (there is nothing to identify) and page
+than linked. It skips sniffing (there is nothing to identify) and page
 counting (pasted text has no pages), but shares every other rule: the same
 length cap, the same TEXT branch, the same `ExtractedDocument`. Downstream code
 therefore cannot tell the two apart, which is the point - a paste is a document
@@ -50,19 +53,10 @@ from pypdf import PdfReader
 
 logger = logging.getLogger(__name__)
 
-# --- Limits -----------------------------------------------------------------
-#
-# These bound the DOCUMENT, not the model call (timeouts and retries live with
-# the service that makes it). Every one of them is a cost ceiling as much as a
-# safety one: on the FILE branch the provider bills per rendered page.
 
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
 MAX_PAGES = 30
 MAX_TEXT_CHARS = 250_000
-
-# Average extracted characters per page below which a PDF is treated as a scan.
-# A genuinely sparse text page (a cover sheet, an index) still clears this once
-# averaged over the document; a scan yields ~0.
 MIN_CHARS_PER_PAGE = 100
 
 # Branches: how the document should be attached to a model request.
@@ -88,21 +82,17 @@ MEDIA_TYPES = {
 
 ACCEPTED_DESCRIPTION = "PDF, DOCX, JPG or PNG"
 
-# Pasted text is capped by the same MAX_TEXT_CHARS as an extracted file, but it
-# also needs a floor: a file at least had to be a real PDF to get this far,
-# whereas a text box will happily submit "hi". Below this there is nothing to
-# summarise and the call would be paid for anyway.
 MIN_TEXT_CHARS = 200
 
 
 class DocumentError(ValueError):
-    """The upload cannot be processed. The message is caller-facing, so it must
+    """The document cannot be processed. The message is caller-facing, so it must
     stay free of internals - it is shown to whoever sent the file."""
 
 
 @dataclass(frozen=True)
 class ExtractedDocument:
-    """What one upload became.
+    """What one document became.
 
     `text` is set on the TEXT branch only; the other two branches send the raw
     bytes, so the caller reads `data` and `media_type` instead. `page_count` is
@@ -122,11 +112,6 @@ class ExtractedDocument:
         return len(self.data)
 
 
-# --- Identification ---------------------------------------------------------
-#
-# By content, never by the declared Content-Type or the filename extension:
-# both are set by the client and neither is evidence of anything.
-
 _PDF_MAGIC = b"%PDF-"
 _ZIP_MAGIC = b"PK\x03\x04"
 _JPEG_MAGIC = b"\xff\xd8\xff"
@@ -144,7 +129,8 @@ def sniff(data: bytes) -> str:
     if data.startswith(_ZIP_MAGIC) and _is_docx_zip(data):
         return KIND_DOCX
     raise DocumentError(
-        f"Unsupported file type. Please upload a {ACCEPTED_DESCRIPTION} file."
+        f"Unsupported file type. Please link to a {ACCEPTED_DESCRIPTION} "
+        f"document, or paste its text."
     )
 
 
@@ -162,14 +148,14 @@ def _is_docx_zip(data: bytes) -> bool:
 
 
 def extract(data: bytes) -> ExtractedDocument:
-    """Validate an upload and turn it into the branch that should be sent.
+    """Validate a file's bytes and turn them into the branch that should be sent.
 
     Raises `DocumentError` for an empty, oversized, unsupported, encrypted, too
     long, or unreadable file - every rejection happens here, before anything
     reaches a model and costs money.
     """
     if not data:
-        raise DocumentError("The uploaded file is empty.")
+        raise DocumentError("That document is empty.")
     if len(data) > MAX_FILE_BYTES:
         raise DocumentError(
             f"File is too large ({len(data) / 1_048_576:.1f} MB). "
@@ -189,7 +175,7 @@ def extract(data: bytes) -> ExtractedDocument:
         if not text:
             raise DocumentError(
                 "No readable text was found in this document. If it is a scan, "
-                "please upload it as a PDF or an image instead."
+                "please link to it as a PDF or an image instead."
             )
         return ExtractedDocument(
             kind=kind,
@@ -204,27 +190,14 @@ def extract(data: bytes) -> ExtractedDocument:
 
 
 def from_text(text: str) -> ExtractedDocument:
-    """Turn pasted text into the same `ExtractedDocument` an upload becomes.
-
-    Every rejection happens here, as it does in `extract`, before anything
-    reaches a model: too short to be a document, or past the same length cap a
-    file is held to.
-
-    `page_count` stays None and no `--- Page N ---` markers are added. That is
-    not an omission - pasted text genuinely has no pages, so every entry comes
-    back `page_status: unavailable`, exactly as a DOCX does. Inventing markers
-    to fill the field would publish page numbers that refer to nothing.
-
-    `data` carries the UTF-8 bytes so `size_bytes` still means something in the
-    log line; nothing sends them, because the TEXT branch travels as `text`.
-    """
+    """Turn pasted text into the same `ExtractedDocument` a linked file becomes."""
     cleaned = text.strip()
     if not cleaned:
         raise DocumentError("No text was provided.")
     if len(cleaned) < MIN_TEXT_CHARS:
         raise DocumentError(
             f"This text is too short to summarise ({len(cleaned)} characters). "
-            f"Please paste at least {MIN_TEXT_CHARS} characters, or upload the "
+            f"Please paste at least {MIN_TEXT_CHARS} characters, or link to the "
             f"document itself."
         )
 
@@ -248,14 +221,12 @@ def _extract_pdf(data: bytes, media_type: str) -> ExtractedDocument:
             "This PDF could not be read. It may be corrupt or incomplete."
         ) from exc
 
-    # Must be checked before anything touches the pages: on an encrypted file
-    # `reader.pages` itself raises, so a later check would report it as corrupt.
-    # And were the check dropped entirely, a decryptable-but-locked file would
-    # extract as empty pages - indistinguishable from a scan - and get silently
-    # routed to the far more expensive file branch instead of being reported.
+    # Checked before `reader.pages` is touched: that raises on an encrypted
+    # file, and a locked file that got past would extract as empty pages -
+    # indistinguishable from a scan - and silently take the expensive FILE branch.
     if encrypted:
         raise DocumentError(
-            "This PDF is password protected. Please upload an unlocked copy."
+            "This PDF is password protected. Please link to an unlocked copy."
         )
 
     try:
@@ -270,7 +241,7 @@ def _extract_pdf(data: bytes, media_type: str) -> ExtractedDocument:
     if page_count > MAX_PAGES:
         raise DocumentError(
             f"This document has {page_count} pages. "
-            f"The limit is {MAX_PAGES} pages per upload."
+            f"The limit is {MAX_PAGES} pages per document."
         )
 
     pages = []
@@ -284,8 +255,6 @@ def _extract_pdf(data: bytes, media_type: str) -> ExtractedDocument:
 
     extracted = sum(len(text) for _, text in pages)
     if extracted / page_count < MIN_CHARS_PER_PAGE:
-        # No usable text layer: a scan or a photocopy. Send the file itself and
-        # let the model read the rendered pages.
         return ExtractedDocument(
             kind=KIND_PDF,
             branch=BRANCH_FILE,

@@ -7,6 +7,11 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
     "google-genai>=2.22.0",
+    # Used directly by `utils.url_fetch` (downloading a linked document) and
+    # by `summary_providers` for its error types. It arrives transitively via
+    # openai/google-genai anyway, but relying on that would let either of them
+    # drop it in a minor release and break us.
+    "httpx>=0.28.1",
     "openai>=3.6.0",
     # PDF text extraction. BSD-licensed - do NOT swap in PyMuPDF/fitz, which is
     # AGPL and would infect this service.

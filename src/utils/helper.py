@@ -22,21 +22,7 @@ import unicodedata
 # 3. flatten - collapses the surviving line breaks, producing the single-line
 #    string actually sent to the model.
 #
-# Line breaks surviving step 1 is what makes step 2 work: an injected
-# imperative is anchored to the start of a sentence OR a line (_SENTENCE_START,
-# and the line-anchored role marker below). If cleaning collapsed newlines into
-# spaces first, "my case\nIgnore all previous instructions" would present to
-# the scanner as one run-on sentence with no boundary in front of the payload,
-# and every pattern would miss it. So flattening is deferred to step 3.
-#
-# Callers that also instruct their model to ignore embedded instructions (e.g.
-# via their own system prompt) get this as a second, independent layer. It is
-# deliberately the weaker of the two: it blocks the obvious cases, and leans on
-# the model for the rest rather than risking a false positive, because a false
-# positive silently rejects a real client describing a real dispute.
 
-# Zero-width / invisible characters sometimes used to break up a blocked
-# phrase or hide a payload (e.g. "ig​nore previous instructions").
 _ZERO_WIDTH_CHARS = [
     0x200B,  # zero width space
     0x200C,  # zero width non-joiner

@@ -1,63 +1,3 @@
-"""Checking extracted items back against the document they came from, and
-working out which page of it each one is on.
-
-Everything else in this feature asks the model to be truthful. This module is
-the only part that *checks*. The prompt's grounding rule - "if the document
-does not state it, return null" - is unfalsifiable on its own, because a
-fabricated chronology reads exactly like a correct one. So the model is also
-asked to quote the words that support each entry, and those quotes are looked
-for in the text we extracted ourselves.
-
-PAGE NUMBERS ARE NEVER TAKEN FROM THE MODEL.
-
-This is the rule the module is arranged around, and it is structural rather
-than a matter of care: `check()` has no parameter through which a
-model-supplied page could arrive, and `source_pages` is absent from the
-response schema the model answers against. A page number is published only when
-this module has found the quoted words inside that page's own text. There is no
-path by which a plausible-looking number the model produced can reach a reader,
-so the failure that matters here - a citation that looks checkable and is not -
-cannot happen.
-
-That leaves two independent questions about every entry, reported separately
-because the answers genuinely differ:
-
-* Are these words in the document?  -> `verified` / `unverified` /
-  `not_verifiable`.
-* Which page are they on?           -> `mapped` / `unmapped` / `unavailable`.
-
-An entry can be verified but unmapped: the words are in the document, but the
-file has no page structure, or the phrase recurs on so many pages that finding
-it locates nothing. Collapsing the two verdicts would mean either discarding a
-confirmed quote or claiming a page we did not find - so nothing is marked
-page-mapped without pages to show, and `source_pages` is non-empty if and only
-if `page_status` is `mapped`.
-
-The match is deliberately forgiving about *characters* and strict about
-*words*. A PDF text layer and a model transcription of it disagree constantly
-about hyphenation, curly quotes, ligatures and line-wrap spacing, and none of
-those differences mean the quote was invented. So both sides are reduced to
-their letters and digits before comparing. What survives that reduction is the
-actual sequence of words, which is the thing worth being strict about.
-
-Nothing is verifiable on the FILE and IMAGE branches - a scan has no text layer
-for us to hold, which is the whole reason it went to the model as a file. Those
-entries are `not_verifiable` and `unavailable`, which are honest third answers
-rather than synonyms for either of the others.
-
-One caveat worth passing on to whoever reads a page number: these are positions
-in the file, counted from one, not the numbers printed on the page. A filing
-whose first two leaves are a cover sheet and an index reports the third leaf as
-page 3 even where it is printed "1".
-
-WHY UNVERIFIED ENTRIES ARE KEPT. Dropping them would be a silent edit of a
-lawyer's brief on the strength of a string comparison, and the false-positive
-rate against real filings is not yet known. Label first, measure on real
-documents, and only then decide whether anything should be removed. This is the
-same call `case_summarization_service` makes about running the injection
-scanner in log-only mode, for the same reason.
-"""
-
 from __future__ import annotations
 
 import re
@@ -76,20 +16,10 @@ PAGES_UNAVAILABLE = "unavailable"
 
 PAGE_STATUSES = (PAGES_MAPPED, PAGES_UNMAPPED, PAGES_UNAVAILABLE)
 
-# Below this many letters and digits a quote proves nothing: "the plaintiff"
-# occurs in every filing ever drafted, so finding it is neither evidence that
-# the entry is grounded nor a usable way to place it on a page.
 MIN_SNIPPET_CHARS = 12
 
-# Only the head of a long quote is matched. A model told to quote 25 words
-# sometimes returns a paragraph, and the longer the string the likelier some
-# transcription difference breaks an exact comparison - while the first 300
-# characters are already far past the point of proving where it came from.
 MATCH_PREFIX_CHARS = 300
 
-# A boilerplate phrase can recur on every page of a filing. Past this many
-# occurrences the quote is not distinctive enough to place anything, and
-# listing thirty pages would be worse than admitting we cannot locate it.
 MAX_OCCURRENCES = 8
 
 _PAGE_MARKER = re.compile(r"^--- Page (\d+) ---$", re.MULTILINE)
@@ -114,13 +44,7 @@ _LOOKALIKES = str.maketrans(
 
 
 def reduce_text(text: str) -> str:
-    """Letters and digits only, lowercased.
-
-    Punctuation, case and every kind of whitespace are dropped rather than
-    normalised, because that is exactly the set of things that differs between
-    a text layer and a faithful quotation of it. Two strings that reduce to the
-    same value contain the same words in the same order.
-    """
+    """Letters and digits only, lowercased."""
     return _NOT_ALNUM.sub("", text.translate(_LOOKALIKES).lower())
 
 
@@ -141,16 +65,6 @@ def _split_pages(text: str) -> list[tuple[int, str]]:
 class DocumentIndex:
     """The extracted text in the one form quotes are compared against, plus a
     map from a position in it back to a page number.
-
-    The page bodies are concatenated WITHOUT their markers, and each page's
-    span in that concatenation is recorded. Searching the concatenation rather
-    than page by page is what lets a quote spanning a page break be found at
-    all; the span table is what turns the position it was found at back into
-    page numbers. Reducing the raw text instead would leave "page1", "page2"
-    embedded at exactly the point such a quote has to match across.
-
-    Built once per request and reused across every entry: reducing a
-    250 000-character document is not free and there can be a hundred entries.
     """
 
     def __init__(self, text: str | None, page_count: int | None = None) -> None:

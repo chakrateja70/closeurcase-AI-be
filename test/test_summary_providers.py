@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 from src.core.exceptions import (
     BadGatewayAPIException,
@@ -266,27 +267,32 @@ def test_rejected_credentials_are_logged_not_leaked(gemini_provider, caplog):
 
 
 @pytest.mark.parametrize("text", ["", None], ids=["empty", "none"])
-def test_an_empty_response_is_reported_as_truncation(text):
-    """Both providers route through this, so a cut-off answer fails the same
-    way on either - almost always the output-token cap on a dense document,
-    which a retry would hit again."""
-    with pytest.raises(BadGatewayAPIException, match="cut off"):
-        summary_providers._parse(text, MODEL_GPT)
+def test_an_empty_response_is_not_blamed_on_length(text):
+    """Truncation is refused by each provider before `parse` runs, so an empty
+    answer here is a refusal or a safety block. Telling the caller to send a
+    shorter document would point them at the wrong fix."""
+    with pytest.raises(BadGatewayAPIException) as excinfo:
+        summary_providers.parse(text, MODEL_GPT)
+
+    message = excinfo.value.detail["error_message"]
+    assert "no result" in message
+    assert "cut off" not in message
+    assert "shorter" not in message
 
 
 def test_unparseable_json_is_rejected():
     with pytest.raises(BadGatewayAPIException, match="unreadable"):
-        summary_providers._parse("not json at all", MODEL_GEMINI)
+        summary_providers.parse("not json at all", MODEL_GEMINI)
 
 
 def test_a_json_array_is_rejected():
     """Valid JSON, wrong shape - normalisation downstream assumes a dict."""
     with pytest.raises(BadGatewayAPIException, match="unexpected"):
-        summary_providers._parse('["a", "b"]', MODEL_GEMINI)
+        summary_providers.parse('["a", "b"]', MODEL_GEMINI)
 
 
 def test_a_json_object_is_returned():
-    assert summary_providers._parse('{"is_valid": true}', MODEL_GPT) == {
+    assert summary_providers.parse('{"is_valid": true}', MODEL_GPT) == {
         "is_valid": True
     }
 
@@ -376,16 +382,24 @@ def test_the_gemini_timeout_is_expressed_in_milliseconds(monkeypatch):
 class FakeGeminiClient:
     """Enough of the genai client surface for generate() to run against."""
 
-    def __init__(self, raises=None, text=None):
+    def __init__(self, raises=None, text=None, finish_reason=None):
         self._raises = raises
         self._text = text
+        self._finish_reason = finish_reason
         self.aio = SimpleNamespace(models=SimpleNamespace(generate_content=self._call))
 
     async def _call(self, **kwargs):
         self.kwargs = kwargs
         if self._raises is not None:
             raise self._raises
-        return SimpleNamespace(text=self._text, usage_metadata=None)
+        candidates = (
+            [SimpleNamespace(finish_reason=self._finish_reason)]
+            if self._finish_reason is not None
+            else []
+        )
+        return SimpleNamespace(
+            text=self._text, usage_metadata=None, candidates=candidates
+        )
 
 
 @pytest.mark.anyio
@@ -433,3 +447,62 @@ async def test_both_providers_send_the_same_system_prompt():
     await GeminiSummaryProvider(client=client).generate(TEXT_PAYLOAD)
 
     assert client.kwargs["config"].system_instruction == SYSTEM_PROMPT
+
+
+# --- The output-token budget is one budget ----------------------------------
+#
+# Gemini 2.5 charges reasoning tokens against max_output_tokens. Both of these
+# exist because of one real failure: a 13-page scanned writ petition spent
+# 7,498 tokens thinking and 8,871 answering, hit the 16,384 ceiling, and came
+# back as truncated JSON that the caller was told was "unreadable".
+
+
+@pytest.mark.anyio
+async def test_gemini_does_not_spend_the_answer_budget_on_thinking():
+    """Load-bearing, not a tuning preference. With thinking on, the shared
+    MAX_OUTPUT_TOKENS means "the whole answer" for OpenAI and "whatever
+    reasoning left over" for Gemini - so the two are no longer held to one
+    ceiling, which is the basis for comparing them at all."""
+    client = FakeGeminiClient(text="{}")
+    await GeminiSummaryProvider(client=client).generate(TEXT_PAYLOAD)
+
+    config = client.kwargs["config"]
+    assert config.thinking_config.thinking_budget == 0
+    assert config.max_output_tokens == summary_providers.MAX_OUTPUT_TOKENS
+
+
+def test_the_ceiling_fits_both_providers():
+    """One number for both, so it has to stay inside the smaller of the two
+    limits - gpt-4.1-mini accepts 32768, Gemini would take more."""
+    assert summary_providers.MAX_OUTPUT_TOKENS <= 32768
+
+
+@pytest.mark.anyio
+async def test_a_truncated_gemini_answer_says_it_was_cut_off():
+    """Not "unreadable". A truncated object is unparseable, so without this
+    check it reached `parse` and came back blaming the model for malformed
+    JSON - pointing away from the real cause and inviting a retry that is
+    guaranteed to fail identically. The OpenAI adapter has always checked its
+    own `status == "incomplete"`; this is the missing half."""
+    client = FakeGeminiClient(
+        text='{"is_valid": true, "chronology": [{"event": "half an ob',
+        finish_reason=genai_types.FinishReason.MAX_TOKENS,
+    )
+
+    with pytest.raises(BadGatewayAPIException) as excinfo:
+        await GeminiSummaryProvider(client=client).generate(TEXT_PAYLOAD)
+
+    message = excinfo.value.detail["error_message"]
+    assert "cut off" in message
+    assert "shorter document" in message
+
+
+@pytest.mark.anyio
+async def test_a_complete_gemini_answer_is_not_treated_as_truncated():
+    client = FakeGeminiClient(
+        text='{"is_valid": true}', finish_reason=genai_types.FinishReason.STOP
+    )
+
+    result = await GeminiSummaryProvider(client=client).generate(TEXT_PAYLOAD)
+
+    assert result == {"is_valid": True}

@@ -1,21 +1,3 @@
-"""Per-client request tracking, and the client IP every log line is tagged with.
-
-Two things live here:
-
-1. `client_ip` - resolving who the caller actually is. This is a single
-   function so there is exactly one place to change when the app moves behind
-   a proxy, rather than a scattering of `request.client.host` reads.
-2. `RequestContextMiddleware` - counts requests per client and logs one line
-   per request with the IP, the running total, and the outcome.
-
-The counter is in-process and deliberately simple: a dict of IP -> count,
-capped so a flood of unique addresses cannot grow it without bound. It is a
-diagnostic aid, NOT the rate limiter - slowapi owns enforcement, and its
-counters roll over every window. These totals are cumulative for the life of
-the process and reset on restart. With multiple workers each process counts
-only the requests it served.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -32,13 +14,7 @@ MAX_TRACKED_CLIENTS = 10_000
 
 
 def client_ip(request: Request) -> str:
-    """The caller's address.
-
-    `request.client.host` is the TCP peer. Behind a proxy that is the proxy,
-    not the user - run uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy>`
-    and it rewrites this to the real client from X-Forwarded-For. Reading the
-    header directly here would be spoofable, so we deliberately do not.
-    """
+    """The caller's address."""
     return request.client.host if request.client else "unknown"
 
 
