@@ -76,43 +76,32 @@ class CaseDetectionService:
     async def detect_case(self, query: str, client: str = "-") -> dict:
         """`client` is a caller label used only for logging - the IP and how
         many requests it has made - so a line can be traced to who sent it."""
-        text = clean_text(query)
-        logger.info(
-            "[%s] detect: query=%r (%d chars)", client, _preview(text), len(text)
-        )
-
-        if len(text) < MIN_QUERY_LENGTH:
-            logger.info("[%s] detect: rejected, too short (%d chars)", client, len(text))
+        if len(query) < MIN_QUERY_LENGTH:
+            logger.info("[%s] detect: rejected, too short (%d chars)", client, len(query))
             return self._invalid(
                 "The query is too short to classify. Please describe the issue "
                 "in a sentence or two."
             )
-
-        issue = find_security_issue(text)
+        
+        issue = find_security_issue(query)
         if issue:
             logger.warning(
                 "[%s] detect: BLOCKED reason=%s query=%r",
                 client,
                 issue,
-                _preview(text),
+                _preview(query),
             )
             return self._invalid(BLOCKED_QUERY_RESPONSE)
+        
+        text = clean_text(query)
+        logger.info(
+            "[%s] detect: query=%r (%d chars)", client, _preview(text), len(text)
+        )
+    
 
         raw = await self._classify(flatten(text))
         result = self._normalise(raw)
 
-        if result["is_valid"]:
-            logger.info(
-                "[%s] detect: primary=%s (%s) secondary=%s confidence=%s services=%d",
-                client,
-                result["primary_case_type_id"],
-                result["primary_case_category_id"],
-                result["secondary_case_type_id"],
-                result["confidence"],
-                len(result["primary_legal_services"]),
-            )
-        else:
-            logger.info("[%s] detect: model returned not a legal issue", client)
         return result
 
     async def _classify(self, query: str) -> dict:
@@ -132,7 +121,6 @@ class CaseDetectionService:
                         "strict": True,
                     }
                 },
-                temperature=0,
                 max_output_tokens=MAX_OUTPUT_TOKENS,
                 store=False,
             )
