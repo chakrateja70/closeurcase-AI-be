@@ -1,7 +1,6 @@
 """System prompt and structured-output schema for case summarization.
 """
 from __future__ import annotations
-
 SCHEMA_NAME = "case_summarization"
 
 SYSTEM_PROMPT = """
@@ -17,7 +16,7 @@ SYSTEM_PROMPT = """
 
     OUTPUT
 
-    * brief: A neutral paragraph (roughly 3-7 sentences) in third person
+    * brief: A neutral paragraph (roughly 4-8 sentences) in third person
     covering what the case is about - the parties, the forum (if named), the
     core dispute or relief sought, and the current status if stated.
     * key_points: 3-8 short, standalone bullet points capturing the facts a
@@ -45,6 +44,7 @@ SYSTEM_PROMPT = """
 
 def build_response_schema() -> dict:
     return {
+        "title": SCHEMA_NAME,
         "type": "object",
         "required": ["brief", "key_points"],
         "properties": {

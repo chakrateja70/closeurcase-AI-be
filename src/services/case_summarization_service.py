@@ -58,7 +58,7 @@ def _filename_from_url(url: str) -> str:
     return name or "document.pdf"
 
 
-async def _fetch_pdf(url: str) -> bytes:
+async def fetch_pdf(url: str) -> bytes:
     _guard_against_private_host(url)
 
     try:
@@ -153,7 +153,7 @@ class CaseSummarizationService:
                 "[%s] summarize: fetching %d document(s)", client, len(case_input.urls)
             )
             documents = await asyncio.gather(
-                *(_fetch_pdf(url) for url in case_input.urls)
+                *(fetch_pdf(url) for url in case_input.urls)
             )
             parts = [
                 DocumentPart(data=data, filename=_filename_from_url(url))
@@ -166,7 +166,9 @@ class CaseSummarizationService:
             schema=RESPONSE_SCHEMA,
             schema_name=SCHEMA_NAME,
             max_output_tokens=MAX_OUTPUT_TOKENS,
+            trace_label=client,
         )
+        logger.info("[%s] summarize: completed provider=%s", client, provider.value)
         return self._normalise(raw)
 
     def _normalise(self, raw: dict) -> dict:

@@ -42,6 +42,11 @@ must all be present to start. `SUMMARY_PROVIDER` is validated at startup
 (`OPENAI_MODEL`, `GEMINI_MODEL`) are hardcoded in settings, and the token /
 timeout / retry constants live as module-level constants in the services.
 
+`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/`LANGFUSE_HOST` are the one
+exception to the "required" pattern above: they gate optional tracing (see
+below) and a missing pair does not fail startup — `src/core/tracing.py`
+just skips it.
+
 ## Architecture
 
 Layered FastAPI app. Router wiring is two-level: `src/api/<feature>.py` owns a
@@ -93,21 +98,80 @@ made in `llm_service` does *not* reach detection.
 
 ### Summarization: one call shape, two providers
 
-`src/services/llm_service.py` is the provider abstraction. `LLMClient` exposes a
+`src/services/llm_service.py` is the provider abstraction, built on LangChain's
+provider integrations (`langchain-openai`, `langchain-google-genai`) rather
+than the raw `openai`/`google-genai` SDKs directly. `LLMClient` exposes a
 single method — `complete_json(instructions, parts, schema, schema_name,
-max_output_tokens)` — implemented by `OpenAILLMClient` and `GeminiLLMClient`.
-Content is passed as provider-neutral `TextPart` / `DocumentPart` dataclasses
-and translated at the edge (`_openai_content`, `_gemini_part`). Every provider
-error is re-raised as one of the `LLM*Error` classes in `src/core/exceptions.py`,
-so callers see one failure shape whichever backend ran.
+max_output_tokens, trace_label)` — implemented by `OpenAILLMClient` and
+`GeminiLLMClient`, both thin subclasses of `_LangChainLLMClient` that differ
+only in which `ChatOpenAI`/`ChatGoogleGenerativeAI` instance they wrap and
+which `with_structured_output` kwargs they pass (`strict=True` for OpenAI
+only). Content is passed as provider-neutral `TextPart` / `DocumentPart`
+dataclasses and translated once, in `_content_blocks`, into LangChain's
+standard v1 message content blocks (`{"type": "text", ...}` /
+`{"type": "file", "mime_type": ..., "base64": ...}`) — both chat models
+translate those to their own wire format internally, so there is no
+per-provider branching left in this file. Adding a third summarization
+provider means adding one more `_LangChainLLMClient` subclass here, wiring
+its API key through `settings.py` and `summary_provider.py`, and nothing
+else.
 
-Two provider quirks are already handled and easy to undo:
+Every provider error surfaces through LangChain's own provider-agnostic
+hierarchy (`langchain_core.exceptions.Model*Error` — `ModelAuthenticationError`,
+`ModelRateLimitError`, `ModelTimeoutError`, etc.), which `ChatOpenAI` and
+`ChatGoogleGenerativeAI` both populate under the hood by wrapping the same
+`openai`/`google-genai` exceptions the old raw-SDK version caught directly.
+`_LangChainLLMClient.complete_json` catches that one shared hierarchy and
+re-raises the `LLM*Error` classes in `src/core/exceptions.py`, so callers see
+one failure shape whichever backend ran — the mapping used to be duplicated
+per provider; now it isn't.
 
-- OpenAI strict mode needs `additionalProperties: false` on **every** nested
-  object; `_openai_strict_schema` injects it recursively. Prompts therefore
-  write plain JSON Schema and must not hand-roll it.
-- `GeminiLLMClient.aclose()` is intentionally a no-op — google-genai owns its
-  httpx clients internally, unlike `AsyncOpenAI`'s pool.
+Schemas no longer need `additionalProperties: false` hand-injected — LangChain's
+`with_structured_output(..., method="json_schema")` does that recursively for
+OpenAI strict mode on its own. The one thing schemas must still carry
+themselves is a top-level `"title"` (see `case_summarization_prompt.py`),
+which LangChain uses as the schema/function name; without it,
+`with_structured_output` raises at call time, not at import time.
+
+The two providers don't even agree on the invocation kwarg for
+`max_output_tokens`: `ChatOpenAI` forwards straight to the Chat
+Completions/Responses API, which calls it `max_tokens`; `ChatGoogleGenerativeAI`'s
+config object only accepts `max_output_tokens` and raises a pydantic
+`ValidationError` (not one of the `Model*Error` types) if you pass `max_tokens`
+instead. Each subclass names its own kwarg via `_max_tokens_kwarg` for exactly
+this reason — collapsing it back to one shared name will break Gemini silently
+until the first real call.
+
+`GeminiLLMClient.aclose()` is intentionally a no-op — google-genai (still the
+library `ChatGoogleGenerativeAI` wraps internally) owns its httpx clients
+internally, unlike `AsyncOpenAI`'s pool, which `OpenAILLMClient.aclose()`
+reaches via `ChatOpenAI.root_async_client`.
+
+### Optional Langfuse tracing
+
+`src/core/tracing.py` wires a Langfuse callback handler into every
+summarization LLM call via LangChain's callback system
+(`langfuse.langchain.CallbackHandler`), for both providers, at no cost to
+callers who haven't configured it. `TRACING_ENABLED` is computed once from
+`settings.LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`; when either is empty,
+`callback_handler()` returns `None` and `_LangChainLLMClient.complete_json`
+passes an empty `RunnableConfig` — tracing is best-effort, never a hard
+dependency for summarization to work.
+
+`init_tracing()` must run in `main.py`'s lifespan *before* any request can
+reach `callback_handler()`: Langfuse's `get_client()` lazily creates a
+default client from raw env vars on first use, and a client created that way
+would not carry the `mask` function configured below. Constructing the
+`Langfuse(...)` singleton explicitly at startup is what guarantees every
+later `CallbackHandler()` call reuses it.
+
+Case text and document content are sensitive (see "Known gaps" below), so the
+client is configured with `mask` set to a function that unconditionally
+redacts every span's `input`/`output`/`metadata` before export — Langfuse
+still receives `model`, `usage_details`, `tags`, and latency (these are
+separate, non-maskable span fields), but never the case content itself. If a
+future change needs partial visibility into trace content, it has to happen
+in that `_mask` function, not by disabling masking outright.
 
 Provider selection is three-layered: `settings.SUMMARY_PROVIDER` is the default,
 `available_summary_providers()` (`src/core/summary_provider.py`) filters to the
@@ -202,4 +266,9 @@ surface regardless of the page being protected. Because `openapi_url=None`,
 - `src/api/counter_generation.py` is empty and unreferenced.
 - Only `src/utils/helper.py` has tests; the document-fetch guards, provider
   resolution, and error handlers are untested despite being pure and easy to
-  test.
+  test. `llm_service.py`'s LangChain-based clients and `tracing.py`'s masking
+  are in the same untested category.
+- Langfuse tracing is a new outbound network dependency of the summarization
+  path (batched/async span export, not on the request's critical path), so a
+  Langfuse outage should not fail requests — but this isn't covered by a
+  test, only by `TRACING_ENABLED`'s best-effort design.

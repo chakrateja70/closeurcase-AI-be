@@ -26,6 +26,15 @@ class Settings:
             else os.getenv("GEMINI_API_KEY", "")
         )
 
+        # Optional Langfuse tracing for the summarization LLM calls. Unlike
+        # the settings above, a missing key pair does not fail startup -
+        # tracing is skipped and summarization runs exactly as without it.
+        # Host defaults to the EU cloud region; override for the US region
+        # or a self-hosted instance.
+        self.LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+        self.LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+        self.LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
         # Rate limiting. The storage backend is optional: "memory://" keeps
         # counters in-process, so the limit is per worker. Point it at a
         # redis:// URL to share one budget across workers and hosts.
