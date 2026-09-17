@@ -47,7 +47,6 @@ def error_envelope(
         "error_message": error_message,
     }
 
-
 class BaseAPIException(HTTPException):
     """Base exception class for all API exceptions."""
 
@@ -58,16 +57,13 @@ class BaseAPIException(HTTPException):
             detail=error_envelope(status_code, error_message, status_message),
         )
 
-
 class BadRequestAPIException(BaseAPIException):
     def __init__(self, error_message: str = "Bad request"):
         super().__init__(HTTP_400_BAD_REQUEST, error_message)
 
-
 class UnauthorizedAPIException(BaseAPIException):
     def __init__(self, error_message: str = "Unauthorized"):
         super().__init__(HTTP_401_UNAUTHORIZED, error_message)
-
 
 class TooManyRequestsAPIException(BaseAPIException):
     """Upstream provider rate limited us."""
@@ -75,13 +71,11 @@ class TooManyRequestsAPIException(BaseAPIException):
     def __init__(self, error_message: str = "Too many requests, please retry shortly"):
         super().__init__(HTTP_429_TOO_MANY_REQUESTS, error_message)
 
-
 class GatewayTimeoutAPIException(BaseAPIException):
     """Upstream provider did not answer in time."""
 
     def __init__(self, error_message: str = "Upstream service timed out"):
         super().__init__(HTTP_504_GATEWAY_TIMEOUT, error_message)
-
 
 class BadGatewayAPIException(BaseAPIException):
     """Upstream provider answered, but not with something usable."""
@@ -89,27 +83,18 @@ class BadGatewayAPIException(BaseAPIException):
     def __init__(self, error_message: str = "Invalid response from upstream service"):
         super().__init__(HTTP_502_BAD_GATEWAY, error_message)
 
-
 class ServiceUnavailableAPIException(BaseAPIException):
     """Dependency is not configured or is down."""
 
     def __init__(self, error_message: str = "Service temporarily unavailable"):
         super().__init__(HTTP_503_SERVICE_UNAVAILABLE, error_message)
 
-
 class InvalidCaseInputError(ValueError):
     """Base class for case-input validation failures."""
 
-
 class MissingCaseInputError(InvalidCaseInputError):
     def __init__(self):
-        super().__init__("Provide either document_urls or case_text.")
-
-
-class ConflictingCaseInputError(InvalidCaseInputError):
-    def __init__(self):
-        super().__init__("Provide only one of document_urls or case_text, not both.")
-
+        super().__init__("Provide document_urls, case_text, or both.")
 
 class InvalidDocumentUrlSchemeError(InvalidCaseInputError):
     def __init__(self, url: str):
@@ -123,7 +108,9 @@ class InvalidDocumentUrlHostError(InvalidCaseInputError):
 
 class InvalidDocumentUrlTypeError(InvalidCaseInputError):
     def __init__(self, url: str):
-        super().__init__(f"document url must point to a .pdf file: {url}")
+        super().__init__(
+            f"document url must point to a .pdf, .jpg, .jpeg, or .png file: {url}"
+        )
 
 
 # --- Document fetching ---------------------------------------------------
@@ -151,9 +138,9 @@ class DocumentTooLargeError(BadRequestAPIException):
         )
 
 
-class DocumentNotPdfError(BadRequestAPIException):
+class DocumentUnsupportedTypeError(BadRequestAPIException):
     def __init__(self, url: str):
-        super().__init__(f"document at {url} is not a PDF")
+        super().__init__(f"document at {url} is not a supported PDF, JPEG, or PNG file")
 
 
 class DocumentHostNotAllowedError(BadRequestAPIException):
@@ -224,9 +211,7 @@ async def base_api_exception_handler(
 async def http_exception_handler(
     _: Request, exc: StarletteHTTPException
 ) -> JSONResponse:
-    """Everything raising a plain HTTPException - the docs auth 401, 404s on
-    unknown paths, 405s. `headers` matters here: dropping it would strip the
-    WWW-Authenticate challenge and break the docs login prompt."""
+    """Handle plain HTTP errors while preserving response headers."""
     detail = exc.detail
     message = detail if isinstance(detail, str) else str(detail)
     return JSONResponse(
@@ -239,15 +224,7 @@ async def http_exception_handler(
 async def validation_exception_handler(
     _: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Pydantic request-body rejections (an empty query, one over the length
-    cap). The per-field errors are summarised into one message; the raw list
-    is dropped because it echoes the submitted body back to the caller.
-
-    A body that isn't valid JSON at all ("type": "json_invalid") reports its
-    `loc` as the byte offset where parsing failed (e.g. `("body", 21)`) -
-    meaningless to a caller, so it gets a fixed message instead of that
-    offset threaded through the usual "loc: msg" format.
-    """
+    """Summarize validation errors without echoing the submitted body."""
     problems = "; ".join(
         "Invalid JSON format. Please check your syntax."
         if err.get("type") == "json_invalid"

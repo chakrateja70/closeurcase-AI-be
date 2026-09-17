@@ -15,11 +15,9 @@ class Settings:
         self.OPENAI_API_KEY = self._get_required("OPENAI_API_KEY")
 
         # Which LLM backs case summarization: "gpt" (OpenAI) or "gemini"
-        # (Google). Detection is unaffected - it always uses OPENAI_API_KEY
-        # above. Validated here so an unsupported value fails at startup
-        # rather than on the first summarization request.
+        # (Google).
         self.SUMMARY_PROVIDER = self._get_summary_provider()
-        self.GEMINI_MODEL = "gemini-2.5-flash"
+        self.GEMINI_MODEL = "gemini-3.6-flash"
         self.GEMINI_API_KEY = (
             self._get_required("GEMINI_API_KEY")
             if self.SUMMARY_PROVIDER == "gemini"
@@ -27,17 +25,12 @@ class Settings:
         )
 
         # Optional Langfuse tracing for the summarization LLM calls. Unlike
-        # the settings above, a missing key pair does not fail startup -
-        # tracing is skipped and summarization runs exactly as without it.
-        # Host defaults to the EU cloud region; override for the US region
-        # or a self-hosted instance.
+        # the settings above, a missing key pair does not fail startup 
         self.LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
         self.LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
         self.LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 
-        # Rate limiting. The storage backend is optional: "memory://" keeps
-        # counters in-process, so the limit is per worker. Point it at a
-        # redis:// URL to share one budget across workers and hosts.
+        # Rate limiting. The storage backend is optional: "memory://"
         self.DETECT_RATE_LIMIT = self._get_required("DETECT_RATE_LIMIT")
         self.SUMMARIZE_RATE_LIMIT = self._get_required("SUMMARIZE_RATE_LIMIT")
         self.RATE_LIMIT_STORAGE = os.getenv("RATE_LIMIT_STORAGE", "memory://")

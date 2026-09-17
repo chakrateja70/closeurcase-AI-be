@@ -4,27 +4,25 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 from fastapi import APIRouter, Depends, Request, Response, status
 from src.api.deps import get_case_summarization_service
 from src.core.case_input import resolve_case_input
-from src.core.exceptions import ConflictingCaseInputError, MissingCaseInputError
+from src.core.exceptions import MissingCaseInputError
 from src.core.rate_limit import SUMMARIZE_RATE_LIMIT, limiter
 from src.core.request_context import client_ip, counter
 from src.core.summary_provider import available_summary_providers, resolve_summary_provider
 from src.services.case_summarization_service import CaseSummarizationService
 
 MIN_TEXT_LENGTH = 10
-MAX_TEXT_LENGTH = 3072
+MAX_TEXT_LENGTH = 25000
 MAX_DOCUMENT_URLS = 5
 
 router = APIRouter(prefix="/case_summarization", tags=["case_summarization"])
 
 class SummarizeCaseRequest(BaseModel):
-    """Provide either `document_urls` (one or more case document PDFs) or
-    `case_text` (direct text) - not both, only one input type at a time."""
-
+    """Provide document URLs, case text, or both."""
     document_urls: Optional[List[HttpUrl]] = Field(
         default=None,
         min_length=1,
         max_length=MAX_DOCUMENT_URLS,
-        description="URLs to case documents (PDF) to summarize.",
+        description="URLs to case documents (PDF, JPG, or PNG) to summarize.",
         examples=["https://example.com/case1.pdf", "https://example.com/case2.pdf"],
     )
     case_text: Optional[str] = Field(
@@ -53,11 +51,8 @@ class SummarizeCaseRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_input(self) -> "SummarizeCaseRequest":
-        provided = [v for v in (self.document_urls, self.case_text) if v]
-        if not provided:
+        if not self.document_urls and not self.case_text:
             raise MissingCaseInputError()
-        if len(provided) > 1:
-            raise ConflictingCaseInputError()
         resolve_case_input(self.document_urls, self.case_text)
         return self
 
@@ -95,8 +90,8 @@ async def summarize_case(
     payload: SummarizeCaseRequest,
     service: SummarizationService,
 ) -> SummarizeCaseResponse:
-    """Summarize a case from one or more document_urls (PDFs, handed to the
-    model directly) or case_text.
+    """Summarize a case from one or more document_urls (PDFs or images,
+    handed to the model directly), case_text, or both together.
     """
     caller = client_ip(request)
     provider = resolve_summary_provider(payload.model)
