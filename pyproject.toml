@@ -6,6 +6,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
+    "google-genai>=2.23.0",
+    "httpx>=0.28.1",
+    "langchain>=1.4.0",
+    "langchain-google-genai>=4.4.0",
+    "langchain-openai>=1.6.2",
+    "langfuse>=4.15.3",
     "openai>=3.6.0",
     "python-dotenv>=1.2.3",
     "slowapi>=0.1.10",
