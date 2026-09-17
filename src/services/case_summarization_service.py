@@ -1,21 +1,17 @@
-"""Case summarization: given either case document URLs (PDFs, handed to the model directly
-"""
-
 from __future__ import annotations
-
 import asyncio
 import ipaddress
 import logging
 import socket
 import httpx
 from urllib.parse import unquote, urlparse
-from src.core.case_input import CaseInput, CaseInputType
+from src.core.case_input import CaseInput
 from src.core.exceptions import (
     DocumentFetchTimedOutError,
     DocumentHostNotAllowedError,
-    DocumentNotPdfError,
     DocumentTooLargeError,
     DocumentUnreachableError,
+    DocumentUnsupportedTypeError,
 )
 from src.core.summary_provider import SummaryProvider, available_summary_providers
 from src.prompts.case_summarization_prompt import (
@@ -33,10 +29,22 @@ from src.services.llm_service import (
 from src.utils.helper import clean_text, find_security_issue, flatten
 
 MAX_OUTPUT_TOKENS = 2048
-
 DOCUMENT_FETCH_TIMEOUT_SECONDS = 30
 MAX_DOCUMENT_BYTES = 15 * 1024 * 1024  # 15MB per document
-_PDF_MAGIC = b"%PDF-"
+
+# Sniffed from the downloaded bytes rather than trusted from the URL suffix
+# or a response header, both of which the client controls.
+_MAGIC_MIME_TYPES: dict[bytes, str] = {
+    b"%PDF-": "application/pdf",
+    b"\xff\xd8\xff": "image/jpeg",
+    b"\x89PNG\r\n\x1a\n": "image/png",
+}
+
+def _sniff_mime_type(data: bytes) -> str | None:
+    for magic, mime_type in _MAGIC_MIME_TYPES.items():
+        if data.startswith(magic):
+            return mime_type
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -45,20 +53,19 @@ BLOCKED_TEXT_BRIEF = (
     "the case, or a document to summarize."
 )
 
-
 def _build_clients() -> dict[SummaryProvider, LLMClient]:
     clients: dict[SummaryProvider, LLMClient] = {SummaryProvider.GPT: OpenAILLMClient()}
     if SummaryProvider.GEMINI in available_summary_providers():
         clients[SummaryProvider.GEMINI] = GeminiLLMClient()
     return clients
 
-
 def _filename_from_url(url: str) -> str:
     name = unquote(urlparse(url).path.rsplit("/", 1)[-1])
     return name or "document.pdf"
 
 
-async def fetch_pdf(url: str) -> bytes:
+async def fetch_document(url: str) -> tuple[bytes, str]:
+    """Fetch a case document and detect its MIME type from the bytes."""
     _guard_against_private_host(url)
 
     try:
@@ -82,9 +89,10 @@ async def fetch_pdf(url: str) -> bytes:
         raise DocumentUnreachableError(url) from exc
 
     data = b"".join(chunks)
-    if not data.startswith(_PDF_MAGIC):
-        raise DocumentNotPdfError(url)
-    return data
+    mime_type = _sniff_mime_type(data)
+    if mime_type is None:
+        raise DocumentUnsupportedTypeError(url)
+    return data, mime_type
 
 
 def _guard_declared_size(url: str, content_length: str | None) -> None:
@@ -99,15 +107,10 @@ def _guard_declared_size(url: str, content_length: str | None) -> None:
 
 
 def _guard_against_private_host(url: str) -> None:
-    """Resolve the host and reject anything not a public address, before
-    connecting - otherwise a document_url could point at the server's own
-    cloud metadata endpoint or an internal service. This is a best-effort,
-    point-in-time check (the actual connection is a separate DNS lookup), not
-    a substitute for network-level egress controls."""
+    """Reject hosts that resolve to non-public addresses before connecting."""
     host = urlparse(url).hostname
     if not host:
         raise DocumentHostNotAllowedError(url)
-
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as exc:
@@ -124,7 +127,6 @@ def _guard_against_private_host(url: str) -> None:
         ):
             raise DocumentHostNotAllowedError(url)
 
-
 class CaseSummarizationService:
     def __init__(self, clients: dict[SummaryProvider, LLMClient] | None = None):
         # Injected clients belong to the caller (tests, mostly), so only
@@ -140,25 +142,30 @@ class CaseSummarizationService:
     async def summarize(
         self, case_input: CaseInput, provider: SummaryProvider, client: str = "-"
     ) -> dict:
-        """`client` is a caller label used only for logging."""
-        if case_input.type is CaseInputType.TEXT:
+        """Summarize the supplied case text and documents."""
+        parts: list[TextPart | DocumentPart] = []
+
+        if case_input.text:
             cleaned = clean_text(case_input.text)
             issue = find_security_issue(cleaned)
             if issue:
                 logger.warning("[%s] summarize: BLOCKED reason=%s", client, issue)
                 return {"brief": BLOCKED_TEXT_BRIEF, "key_points": []}
-            parts = [TextPart(text=flatten(cleaned))]
-        else:
+            parts.append(TextPart(text=flatten(cleaned)))
+
+        if case_input.urls:
             logger.info(
                 "[%s] summarize: fetching %d document(s)", client, len(case_input.urls)
             )
             documents = await asyncio.gather(
-                *(fetch_pdf(url) for url in case_input.urls)
+                *(fetch_document(url) for url in case_input.urls)
             )
-            parts = [
-                DocumentPart(data=data, filename=_filename_from_url(url))
-                for url, data in zip(case_input.urls, documents)
-            ]
+            parts.extend(
+                DocumentPart(
+                    data=data, filename=_filename_from_url(url), mime_type=mime_type
+                )
+                for url, (data, mime_type) in zip(case_input.urls, documents)
+            )
 
         raw = await self._clients[provider].complete_json(
             instructions=SYSTEM_PROMPT,

@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import base64
 import logging
 import time
@@ -48,7 +47,6 @@ class LLMClient(ABC):
     """One structured-output call with instructions, content parts, and a JSON schema.
     Provider-specific transport and error handling live in subclasses.
     """
-
     @abstractmethod
     async def complete_json(
         self,
@@ -72,11 +70,13 @@ def _content_blocks(parts: list[ContentPart]) -> list[dict]:
     blocks = []
     for part in parts:
         if isinstance(part, DocumentPart):
+            block_type = "image" if part.mime_type.startswith("image/") else "file"
             blocks.append(
                 {
-                    "type": "file",
+                    "type": block_type,
                     "mime_type": part.mime_type,
                     "base64": base64.b64encode(part.data).decode("ascii"),
+                    "filename": part.filename,
                 }
             )
         else:

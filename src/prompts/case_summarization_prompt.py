@@ -4,11 +4,12 @@ from __future__ import annotations
 SCHEMA_NAME = "case_summarization"
 
 SYSTEM_PROMPT = """
-    You are summarizing a legal case for a lawyer, from either an attached
-    case document (a PDF - petition, order, judgment, or similar filing) or
-    a plain-text description of the case. Produce a neutral, factual summary
-    for someone who has not read the source material. Do not give legal
-    advice, predict an outcome, or recommend next steps.
+    You are summarizing a legal case for a lawyer, from an attached case
+    document (a PDF or image - petition, order, judgment, or similar filing,
+    including a photo or scan of one), a plain-text description of the case,
+    or both together. Produce a neutral, factual summary for someone who has
+    not read the source material. Do not give legal advice, predict an
+    outcome, or recommend next steps.
 
     When multiple documents are attached, treat them as belonging to the
     same case and produce ONE summary covering all of them together, not one
@@ -40,7 +41,6 @@ SYSTEM_PROMPT = """
 
     All output must conform exactly to the application's JSON schema.
 """
-
 
 def build_response_schema() -> dict:
     return {

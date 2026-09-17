@@ -181,22 +181,30 @@ available, and `GET /case_summarization/models` advertises the same list.
 `CaseSummarizationService` holds a dict of clients — one per available provider,
 built once — rather than one client.
 
-**Input is either documents or text, never both.** `src/core/case_input.py`
-validates and classifies into a `CaseInput`; the API model rejects zero or two
-inputs before that. PDFs are fetched by URL and handed to the model as bytes,
-never parsed here. Text input goes through the sanitization pipeline below and
-returns a canned brief when blocked; document input does not (the prompt's
-"ignore embedded instructions" rule is the only layer there).
+**Input is documents, text, or both together.** `src/core/case_input.py`
+validates and resolves both into one `CaseInput`; the API model rejects only
+when neither is present. Documents (PDF, JPG, or PNG - a photo/scan of a
+filing counts) are fetched by URL and handed to the model as bytes, never
+parsed here. The text side (present alone or alongside documents) goes
+through the sanitization pipeline below and returns a canned brief when
+blocked, dropping any accompanying documents rather than sending them;
+document input by itself is never sanitized this way (the prompt's "ignore
+embedded instructions" rule is the only layer there).
 
 Document fetching in `case_summarization_service.py` has four guards that exist
 for a reason: `_guard_against_private_host` resolves the host and rejects
 private/loopback/link-local/reserved/multicast addresses — this is the SSRF
 check, since a `document_url` could otherwise point at cloud metadata or an
 internal service — plus a declared-`content-length` check, a streaming byte cap
-(15MB), and a `%PDF-` magic-bytes check after download. The URL-side checks in
-`case_input.py` (http/https only, host present, `.pdf` suffix) are separate and
-run first. Fetch failures raise `BadRequest`, not 502/504, because the upstream
-that failed is a URL the *client* supplied.
+(15MB), and a magic-bytes sniff after download (`_sniff_mime_type`, matching
+`%PDF-`/JPEG/PNG signatures) that also determines the mime type handed to the
+model, rather than trusting the URL suffix or a response header. The URL-side
+checks in `case_input.py` (http/https only, host present, `.pdf`/`.jpg`/`.jpeg`/`.png`
+suffix) are separate and run first. Fetch failures raise `BadRequest`, not
+502/504, because the upstream that failed is a URL the *client* supplied.
+Content is still routed through LangChain's `image` block type for image mime
+types and `file` for everything else (`_content_blocks` in `llm_service.py`),
+since LangChain treats those as distinct standard content blocks.
 
 ### Input sanitization runs in a fixed order
 
